@@ -23,7 +23,7 @@ import sys
 import time
 
 
-APP_TITLE = "Gerador de Documentação (Gemini)"
+APP_TITLE = "Captura"
 MODEL_ID = "gemini-2.5-pro"
 
 
