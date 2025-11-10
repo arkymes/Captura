@@ -1,0 +1,97 @@
+/* --- General Body & Background --- */
+body {
+    background-color: #1e1e2f; /* Dark blue-gray background */
+    color: #e0e0e0; /* Light gray text */
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+/* --- Main Container --- */
+.main .block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+    padding-left: 3rem;
+    padding-right: 3rem;
+}
+
+/* --- Title --- */
+h1 {
+    color: #98a6ff; /* Soft violet for titles */
+    text-align: center;
+    padding-bottom: 1rem;
+}
+
+/* --- Glassmorphism Effect for Containers --- */
+.st-emotion-cache-1r4qj8v, /* Main uploader area */
+.st-emotion-cache-1v0mbdj, /* Tabs container */
+.st-emotion-cache-1kyxreq, /* Text area */
+.st-emotion-cache-q8fbsg,  /* Button container */
+div[data-testid="stTabs"] {
+    background: rgba(40, 42, 60, 0.6); /* Semi-transparent dark background */
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px); /* For Safari */
+    border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 25px;
+    margin-bottom: 20px;
+}
+
+/* --- Tabs Styling --- */
+div[data-testid="stTabs"] button {
+    background-color: transparent;
+    color: #a0a0a0;
+    border: none;
+    border-bottom: 2px solid transparent;
+    transition: all 0.3s ease;
+}
+
+div[data-testid="stTabs"] button[aria-selected="true"] {
+    color: #c7d2ff; /* Lighter violet for selected tab */
+    border-bottom: 2px solid #98a6ff;
+}
+
+/* --- Button Styling --- */
+div[data-testid="stButton"] > button {
+    background-image: linear-gradient(to right, #7e57c2, #5c6bc0); /* Gradient purple-blue */
+    color: white;
+    border: none;
+    border-radius: 10px;
+    padding: 12px 25px;
+    font-weight: bold;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+}
+
+div[data-testid="stButton"] > button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(126, 87, 194, 0.4);
+}
+
+/* --- File Uploader Styling --- */
+div[data-testid="stFileUploader"] {
+    border: 2px dashed #4a4e69;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+}
+
+div[data-testid="stFileUploader"] label {
+    color: #c7d2ff;
+    font-weight: bold;
+}
+
+/* --- Icons (using unicode for simplicity) --- */
+/* You can replace these with actual icon fonts or SVGs */
+.st-emotion-cache-1r4qj8v::before {
+    /* content: '📤 '; */
+}
+.st-emotion-cache-1v0mbdj::before {
+    /* content: '⚙️ '; */
+}
+
+/* --- Sidebar --- */
+div[data-testid="stSidebar"] {
+    background: rgba(30, 30, 47, 0.8);
+    backdrop-filter: blur(10px);
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
