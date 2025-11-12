@@ -243,15 +243,33 @@ def _safe_extract_text(resp) -> str:
 
 
 def _clean_markdown_response(text: str) -> str:
-    """Remove markdown code block markers that may have been added by the AI."""
-    # Remove opening markers like ```markdown or ``` at the beginning
-    text = re.sub(r'^`{3,}(markdown)?\s*\n', '', text, flags=re.MULTILINE)
-    # Remove closing markers like ``` at the end
-    text = re.sub(r'\n`{3,}\s*$', '', text, flags=re.MULTILINE)
-    # Also clean up any other variations of code blocks
-    text = re.sub(r'^````+.*\n', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\n````+\s*$', '', text, flags=re.MULTILINE)
-    return text.strip()
+    """Remove only a top-level wrapping markdown code fence, preserving inline fences like ```mermaid.
+
+    Context: Some LLMs wrap the entire document in ```markdown ... ```. We want to strip ONLY this
+    outer wrapper if present at the very start/end of the document, and never touch inner code blocks
+    such as ```mermaid or regular ```code snippets embedded in the content.
+    """
+    if not text:
+        return ""
+
+    # Normalize newlines for consistent matching
+    s = text
+
+    # Match a code fence at the very beginning of the document, with optional language.
+    # We only remove it if the language is empty or explicitly markdown/md.
+    m = re.match(r"^(\s*)```([A-Za-z0-9_+-]+)?\s*\n", s)
+    if m:
+        leading_ws, lang = m.group(1), (m.group(2) or "").lower()
+        if lang in ("", "markdown", "md"):
+            s = s[m.end():]
+            # Remove a final fence only if nothing but whitespace precedes it
+            s = re.sub(r"\n```\s*$", "", s)
+        else:
+            # Not a markdown wrapper; leave intact
+            return s.strip()
+
+    # Do NOT remove other ``` fences (like ```mermaid) elsewhere.
+    return s.strip()
 
 
 def build_system_instruction() -> str:
@@ -262,7 +280,7 @@ def build_system_instruction() -> str:
     """
     # Base system instruction relies on selected or custom template appended at runtime.
     return (
-        "Você é uma IA especializada em criar documentações operacionais no formato padrão Veronese (R004) ou em um modelo customizado fornecido. "
+        "Você é uma IA especializada em criar documentações operacionais no formato padrão ou em um modelo customizado fornecido. "
         "Transforme o vídeo (e opcionalmente a transcrição) em um documento Markdown (.md) completo.\n\n"
         "IMPORTANTE - REGRAS DE FORMATAÇÃO DO MARKDOWN:\n"
         "1. Comece DIRETAMENTE com o conteúdo. NÃO coloque ```markdown no início.\n"
@@ -273,9 +291,8 @@ def build_system_instruction() -> str:
         "Responda APENAS com o .md completo, sem comentários adicionais ou blocos de código.\n\n"
         "Regras principais inegociáveis:\n"
         "- Preserve exatamente a estrutura e seções do modelo de referência fornecido abaixo.\n"
-        "- Timestamps dos PRINTs vêm somente do vídeo (HH:MM:SS ou MM:SS se < 1h).\n"
-        "- Placeholders obrigatórios no formato: [PRINT DO VÍDEO - HH:MM:SS: Descrição...] {x=123, y=456}\n"
-        "- Cada ação deve ser atômica (um clique, preenchimento ou mudança visual).\n"
+        "- Timestamps dos PRINTs (se necessário) vêm somente do vídeo (HH:MM:SS ou MM:SS se < 1h).\n"
+        "- Placeholders obrigatórios no formato: [PRINT DO VÍDEO - HH:MM:SS: Descrição...] (se necessário e assim pedir o modelo)\n"
         "- Não inventar dados inexistentes; use [Informação não disponível no vídeo] quando algo não estiver visível.\n"
         "- Proibido usar a palavra 'citestart'.\n\n"
         "Modelo de referência (NÃO repetir explicações; apenas siga a estrutura):\n"
@@ -404,8 +421,7 @@ def run_generation(api_key: str,
         temperature=0.65,
         thinking_config=types.ThinkingConfig(thinking_budget=-1),
         system_instruction=[
-            types.Part.from_text(text="""Você é uma IA especializada em criar documentações de processos no formato padrão Veronese (seguir estritamente estrutura do exemplo mais abaixo). Sua função é transformar vídeos demonstrativos e suas transcrições em documentos .md (Markdown) completos, padronizados e prontos para armazenamento/revisão.
-
+            types.Part.from_text(text="""
 Sempre responder APENAS com o arquivo.md da documentação e nada mais
 
 
@@ -428,31 +444,6 @@ Metadados opcionais: nome do processo, departamento, responsável, data, versão
 Regras essenciais (leia com atenção)
 
 Estrutura do documento deve ser idêntica ao modelo:
-Minutagem (timestamps) deve ser obtida diretamente do vídeo — ou seja, ao assistir o vídeo você deve anotar o horário exato (mm:ss ou hh:mm:ss) onde cada print será capturado. Não confiar em timestamps presentes na transcrição.
-
-Placeholders de prints: em todo ponto do passo a passo onde um elemento visual do vídeo auxilia a instrução (tela, botão, menu, caminho de arquivo, confirmação), insira um placeholder com o seguinte formato exato:
-
-[PRINT DO VÍDEO - HH:MM:SS: Descrição sucinta do que aparece no print (ex.: Janela do Explorer mostrando o caminho e a seleção do arquivo da planilha).]
-
-
-Sempre use o horário do vídeo no formato HH:MM:SS (use MM:SS se o vídeo for curto) não usar o timestamp da transcrição.
-
-A descrição deve ser sucinta mas específica (por exemplo, quais menus são visíveis, qual item está selecionado, qual campo está preenchido).
-
-No arquivo .md final, mantenha o placeholder textual (veja item de saída .md abaixo) para que o usuário substitua pelo arquivo de imagem real posteriormente.
-
-Quantidade máxima de prints: inclua o máximo de prints necessário para tornar o passo a passo visualmente exato — capture prints para cada clique crítico, cada preenchimento de campo e cada mudança de tela. Em outras palavras: quando um passo envolver 3 cliques sequenciais que mudam a UI, insira 3 placeholders (um por clique), cada um com o timestamp correspondente.
-
-Detalhamento por clique: toda etapa do passo a passo deve descrever cada clique/ação de forma atômica — por exemplo:
-
-Clique 1: No menu superior, clique em \"Arquivo\".
-
-Clique 2: No submenu, selecione \"Exportar\" → \"Exportar Lista\".
-
-Campo: Em \"Data de Vencimento\", digite 01/01/2025 e pressione Enter.
-
-Para cada clique/ação, se houver mudança visual, adicione o placeholder de print correspondente com o horário do vídeo.
-
 Não inventar informações: se um detalhe não estiver visível no vídeo (ex.: credenciais ocultas, popups que não aparecem), marque [Informação não disponível no vídeo] no local apropriado.
 
 Proibição de termo: não escrever a palavra citestart em nenhuma parte do resultado.
