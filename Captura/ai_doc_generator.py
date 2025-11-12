@@ -557,7 +557,9 @@ def _sanitize_filename(name: str) -> str:
 # ===============================
 
 def main():
-    st.set_page_config(page_title=APP_TITLE, page_icon="🧠", layout="wide")
+    # Carregar ícone em .ico para a janela
+    icon_path = Path(__file__).resolve().parent / "icon" / "captura_icon.ico"
+    st.set_page_config(page_title=APP_TITLE, page_icon=icon_path if icon_path.exists() else "🧠", layout="wide")
     _init_session_state()
     LayoutConfig.init_session_state()
     workdir = Path(__file__).resolve().parent
@@ -585,8 +587,14 @@ def main():
     
     _inject_css()
 
-    st.title(APP_TITLE)
-    st.caption("Envie um vídeo + (opcional) transcrição e receba o DOCX formatado no padrão R004.")
+    # Cabeçalho com ícone e título
+    col_icon, col_title = st.columns([0.08, 0.92])
+    with col_icon:
+        icon_png_path = Path(__file__).resolve().parent / "icon" / "captura_icon.png"
+        if icon_png_path.exists():
+            st.image(str(icon_png_path), width=60)
+    with col_title:
+        st.title(APP_TITLE)
 
     if st.session_state.layout_feedback:
         st.markdown(f"{st.session_state.layout_feedback}")
