@@ -128,6 +128,9 @@ def _inject_css():
     st.markdown(
         """
         <style>
+        /* Esconder o componente streamlit_js_eval que cria bloco vazio */
+        .st-key-layout_loader_single { display: none !important; }
+        
         /* Wrap for the small icon button next to API key */
         .help-btn button {
             width: 36px; height: 36px; border-radius: 999px;
@@ -587,13 +590,20 @@ def main():
     
     _inject_css()
 
-    # Cabeçalho com ícone e título
-    col_icon, col_title = st.columns([0.08, 0.92])
-    with col_icon:
-        icon_png_path = Path(__file__).resolve().parent / "icon" / "captura_icon.png"
-        if icon_png_path.exists():
-            st.image(str(icon_png_path), width=60)
-    with col_title:
+    # Cabeçalho com ícone e título - alinhados perfeitamente
+    icon_png_path = Path(__file__).resolve().parent / "icon" / "captura_icon.png"
+    if icon_png_path.exists():
+        st.markdown(
+            f"""
+            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+                <img src="data:image/png;base64,{base64.b64encode(icon_png_path.read_bytes()).decode()}" 
+                     style="height: 50px; width: auto; object-fit: contain;" />
+                <h1 style="margin: 0; font-size: 2.2rem; font-weight: 700; color: #fff;">Captura</h1>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
         st.title(APP_TITLE)
 
     if st.session_state.layout_feedback:
