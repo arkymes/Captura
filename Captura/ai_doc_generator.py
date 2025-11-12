@@ -130,31 +130,55 @@ def _inject_css():
         <style>
         /* Esconder o componente streamlit_js_eval que cria bloco vazio */
         .st-key-layout_loader_single { display: none !important; }
-        
-        /* Wrap for the small icon button next to API key */
-        .help-btn button {
-            width: 36px; height: 36px; border-radius: 999px;
-            border: 1px solid #374151; background-color: #1f2937; color: #e5e7eb;
-            background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="%23e5e7eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>');
-            background-repeat: no-repeat; background-position: center; cursor: pointer;
-        }
-        .help-btn button:hover { background-color: #111827; border-color: #4b5563; }
 
-        /* Dark modal */
-        .gmodal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 1000; }
-        .gmodal { position: fixed; top: 6%; left: 50%; transform: translateX(-50%);
-                  width: min(900px, 94%); max-height: 86vh; overflow: auto; background: #0f172a;
-                  color: #e5e7eb; border-radius: 12px; padding: 22px 26px; z-index: 1001;
-                  box-shadow: 0 10px 30px rgba(0,0,0,.35); border: 1px solid #1f2937;
+        /* Botão de ajuda sobreposto ao canto superior direito do campo API */
+        .st-key-help_icon {
+            position: relative;
+            width: 100% !important; /* ocupar largura do container para permitir alinhamento à direita */
+            height: 0 !important;    /* não ocupar espaço vertical extra */
+            margin-top: -24px;       /* sobe o container para a área do label */
         }
-        .gmodal h2 { margin-top: 0; font-weight: 600; letter-spacing: .2px; }
-        .gmodal p, .gmodal li { line-height: 1.5; font-size: 0.97rem; }
-        .gmodal ol { padding-left: 22px; }
-        .gmodal .close { position: absolute; top: 10px; right: 14px; font-size: 22px; cursor: pointer; color: #9ca3af; }
-        .gmodal .close:hover { color: #e5e7eb; }
-        .gmodal .hint { background: #0b1220; border: 1px solid #1f2937; padding: 12px 14px; border-radius: 8px; }
-        .gmodal a { color: #93c5fd; text-decoration: none; }
-        .gmodal a:hover { text-decoration: underline; }
+        .st-key-help_icon button {
+            position: absolute;
+            top: -60px;        /* alinhado ao topo do label */
+            right: 2px;
+            width: 18px !important;
+            height: 18px !important;
+            min-width: 18px !important;
+            min-height: 18px !important;
+            aspect-ratio: 1 / 1 !important;
+            padding: 0 !important;
+            border-radius: 50% !important;
+            background: transparent !important;
+            border: 2px solid rgba(255,255,255,0.65) !important;
+            font-size: 11px !important;
+            font-weight: 700 !important;
+            line-height: 1 !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            box-sizing: border-box !important;
+            color: #f0f0f0 !important;
+            cursor: pointer !important;
+            backdrop-filter: none;
+            transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.15s;
+            box-shadow: none;
+            z-index: 5;
+        }
+        .st-key-help_icon button [data-testid="stMarkdownContainer"],
+        .st-key-help_icon button div,
+        .st-key-help_icon button p {
+            margin: 0 !important;
+            padding: 0 !important;
+            line-height: 1 !important;
+        }
+        .st-key-help_icon button:hover {
+            border-color: #ffffff !important;
+            color: #ffffff !important;
+            background: transparent !important;
+            transform: translateY(-1px);
+        }
+        .st-key-help_icon p { margin: 0 !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -162,34 +186,69 @@ def _inject_css():
 
 
 def _help_modal():
+    """Renderiza o modal de ajuda usando st.modal/dialog ou fallback HTML"""
     if not st.session_state.show_help:
         return
 
-    body = """
-    <div class=\"gmodal-overlay\"></div>
-    <div class=\"gmodal\">
-      <div class=\"close\" onclick=\"window.parent.dispatchEvent(new Event('close-help'))\">✖</div>
-      <h2>Como obter sua chave da API do Gemini</h2>
-      <p>Para gerar a documentação com IA, você precisa de uma API Key do Google AI Studio (Gemini).</p>
-      <ol>
-        <li>Acesse <a href=\"https://aistudio.google.com/api-keys\" target=\"_blank\">https://aistudio.google.com/api-keys</a>.</li>
-        <li>Faça login com sua conta Google e conclua a verificação se solicitado.</li>
-        <li>Clique em “Create API key” (Criar chave de API) e escolha “Personal use”.</li>
-        <li>Copie a chave exibida e cole no campo “Gemini API Key” na barra lateral deste app.</li>
-      </ol>
-      <div class=\"hint\">
-        Dica: guarde sua chave com segurança. Você pode revogá-la ou criar uma nova quando quiser, na mesma página.
-      </div>
-      <p style=\"margin-top: 14px;\">Caso prefira um passo a passo ilustrado, abra o link e siga as instruções na própria página.</p>
-    </div>
-    <script>
-      window.addEventListener('close-help', () => { /* noop */ });
-    </script>
-    """
+    # Função auxiliar para renderizar o conteúdo
+    def render_help_content():
+        st.markdown("### Como obter sua chave da API do Gemini")
+        st.markdown("""
+Para gerar a documentação com IA, você precisa de uma API Key do Google AI Studio (Gemini).
 
-    st.markdown(body, unsafe_allow_html=True)
-    # Botão de fechar (server-side)
-    st.button("Fechar ajuda", on_click=lambda: st.session_state.update({"show_help": False}))
+**Siga os passos abaixo:**
+        """)
+        st.markdown("""
+1. Acesse [https://aistudio.google.com/api-keys](https://aistudio.google.com/api-keys)
+2. Faça login com sua conta Google e conclua a verificação se solicitado
+3. Clique em **"Create API key"** (Criar chave de API) e escolha **"Personal use"**
+4. Copie a chave exibida e cole no campo **"Gemini API Key"** na barra lateral deste app
+        """)
+        st.info("💡 Guarde sua chave com segurança. Você pode revogá-la ou criar uma nova quando quiser, na mesma página.")
+        
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("✓ Entendi", key="help_close_btn", use_container_width=True):
+                st.session_state.show_help = False
+                st.rerun()
+
+    # Tentar usar modal/dialog nativos do Streamlit
+    modal_fn = getattr(st, "modal", None)
+    dialog_fn = getattr(st, "dialog", None)
+    exp_dialog_fn = getattr(st, "experimental_dialog", None)
+
+    if callable(modal_fn):
+        with modal_fn("Como obter a chave da API do Gemini", key="help-modal"):
+            render_help_content()
+    elif callable(dialog_fn) or callable(exp_dialog_fn):
+        dialog_callable = dialog_fn if callable(dialog_fn) else exp_dialog_fn
+
+        @dialog_callable("Como obter a chave da API do Gemini")
+        def _help_dialog():
+            render_help_content()
+
+        _help_dialog()
+    else:
+        # Fallback: usar HTML customizado
+        st.markdown(
+            """
+            <style>
+            .help-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 995; }
+            .help-modal-panel { position: fixed; top: 8%; left: 50%; transform: translateX(-50%);
+                width: min(700px, 95%); max-height: 85vh; overflow-y: auto; background: #111827;
+                color: #e5e7eb; border-radius: 12px; padding: 28px 32px; z-index: 996; border: 1px solid #1f2937; }
+            .help-modal-panel h2 { margin-top: 0; margin-bottom: 16px; }
+            .help-modal-panel p { line-height: 1.6; }
+            .help-modal-panel ol { padding-left: 24px; }
+            .help-modal-panel li { margin-bottom: 8px; line-height: 1.5; }
+            </style>
+            <div class="help-modal-backdrop"></div>
+            <div class="help-modal-panel">
+            """,
+            unsafe_allow_html=True,
+        )
+        render_help_content()
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ===============================
@@ -618,15 +677,12 @@ def main():
         if st.button("Configurar layout", key="layout_sidebar_button"):
             st.session_state.layout_modal_open = True
             _trigger_rerun()
-        cols = st.columns([1, 0.2])
-        with cols[0]:
-            api_key = st.text_input("Gemini API Key", type="password", placeholder="AI.../AIza...")
-        with cols[1]:
-            st.write("")
-            st.markdown('<div class="help-btn">', unsafe_allow_html=True)
-            if st.button(" ", key="help_icon", help="Como obter a chave do Gemini"):
-                st.session_state.show_help = True
-            st.markdown('</div>', unsafe_allow_html=True)
+        # Campo API ocupa toda a largura
+        api_key = st.text_input("Gemini API Key", type="password", placeholder="AI.../AIza...")
+        # Botão de ajuda posicionado por CSS sobre o canto superior direito do campo
+        if st.button("?", key="help_icon", help="Como obter a chave do Gemini"):
+            st.session_state.show_help = True
+            _trigger_rerun()
 
         if api_key:
             os.environ["GEMINI_API_KEY"] = api_key
@@ -840,7 +896,9 @@ def main():
             height=150,
         )
 
-    # Render modal AFTER sidebar (so first click works)
+    # Render modals AFTER sidebar (so first click works)
+    _help_modal()
+    
     if st.session_state.layout_modal_open:
         modal_fn = getattr(st, "modal", None)
         dialog_fn = getattr(st, "dialog", None)
@@ -886,8 +944,6 @@ def main():
 
     st.write("")
     generate_btn = st.button("Gerar documentação DOCX", type="primary", use_container_width=True)
-
-    _help_modal()
 
     if generate_btn:
         # Validações
