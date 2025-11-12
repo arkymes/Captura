@@ -638,17 +638,29 @@ def main():
             if name.startswith("model_") and isinstance(getattr(internal_models, name), str)
         }
         template_keys = list(internal_template_map.keys())
-        options = template_keys + ["Customizado"]
-        default_index = options.index(st.session_state.internal_template_key) if st.session_state.internal_template_key in options else 0
-        selected_option = st.selectbox(
+        # Format display options: remove 'model_' prefix and convert to title case
+        display_names = [key.replace("model_", "").replace("_", " ").title() for key in template_keys]
+        options_display = display_names + ["Customizado"]
+        # Map display names back to original keys for retrieval
+        display_to_key = {display: key for display, key in zip(display_names, template_keys)}
+        display_to_key["Customizado"] = "Customizado"
+        
+        # Get the current display name from stored key
+        current_display = display_to_key.get(st.session_state.internal_template_key, None)
+        if current_display is None and st.session_state.internal_template_key.startswith("model_"):
+            current_display = st.session_state.internal_template_key.replace("model_", "").replace("_", " ").title()
+        default_index = options_display.index(current_display) if current_display in options_display else 0
+        
+        selected_display = st.selectbox(
             "Selecionar modelo",
-            options,
+            options_display,
             index=default_index,
             help="Escolha um modelo interno ou selecione 'Customizado' para enviar um arquivo e gerar um modelo novo via agente separado."
         )
-        st.session_state.internal_template_key = selected_option
+        # Map back to the actual template key
+        st.session_state.internal_template_key = display_to_key[selected_display]
 
-        if selected_option == "Customizado":
+        if selected_display == "Customizado":
             st.caption("Envie um arquivo (.pdf ou .txt) para gerar um modelo customizado usando outro agente.")
             uploaded_custom_model = st.file_uploader("Arquivo de modelo (PDF ou TXT)", type=["pdf", "txt"], accept_multiple_files=False)
             generate_custom_model = st.button("Gerar modelo customizado")
