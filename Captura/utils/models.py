@@ -150,6 +150,10 @@ Atualmente, o extrato é obtido diretamente do portal do banco, pois o arquivo g
 
     model_ata_reuniao = """ [Nome do Projeto/Tópico] - Ata de Reunião
 
+[Instruções adicionais]
+NÃO COLOCAR NENHUM TIME STAMP, A NÃO SER QUE AS INFORMAÇÕES ADICIONAIS PEÇAM ISSO.
+
+
 [Explicações de cada campo do modelo]
 *   **Informações Gerais**: Contém os metadados essenciais da reunião.
     *   **Data e Hora**: Data e período em que a reunião ocorreu.
@@ -179,9 +183,6 @@ Atualmente, o extrato é obtido diretamente do portal do banco, pois o arquivo g
 6.  Utilize a tabela de **Itens de Ação (Plano de Ação)** para detalhar as tarefas, quem é o responsável e o prazo.
 7.  Anote quaisquer **Tópicos Pendentes / Próxima Reunião**.
 8.  Mantenha o **HISTÓRICO DE REVISÕES** atualizado a cada modificação.
-
-[Instruções de placeholder de PRINT do modelo]
-Substitua os placeholders `[ ]` pelas informações relevantes. Por exemplo, `[Data da reunião, ex: DD/MM/AAAA, HH:MM - HH:MM]` deve ser substituído por `15/03/2024, 10:00 - 11:00`.
 
 [Exemplo do MD do modelo]
 # [Nome do Projeto/Tópico] - Ata de Reunião

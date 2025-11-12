@@ -291,7 +291,6 @@ def build_system_instruction() -> str:
         "Responda APENAS com o .md completo, sem comentários adicionais ou blocos de código.\n\n"
         "Regras principais inegociáveis:\n"
         "- Preserve exatamente a estrutura e seções do modelo de referência fornecido abaixo.\n"
-        "- Timestamps dos PRINTs (se necessário) vêm somente do vídeo (HH:MM:SS ou MM:SS se < 1h).\n"
         "- Placeholders obrigatórios no formato: [PRINT DO VÍDEO - HH:MM:SS: Descrição...] (se necessário e assim pedir o modelo)\n"
         "- Não inventar dados inexistentes; use [Informação não disponível no vídeo] quando algo não estiver visível.\n"
         "- Proibido usar a palavra 'citestart'.\n\n"
