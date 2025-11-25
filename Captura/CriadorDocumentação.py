@@ -71,7 +71,11 @@ PRINT_PATTERN = re.compile(
     r"(?:\s*(?:\n\s*(?:[-*]\s*)?)?\{(?P<coords>[^{}]+)\})?",
     re.IGNORECASE | re.MULTILINE,
 )
-MERMAID_BLOCK_PATTERN = re.compile(r"(^[ \t]*```mermaid[ \t]*\n)([\s\S]*?)(^[ \t]*```)", re.IGNORECASE | re.MULTILINE)
+# Padrão corrigido para capturar blocos mermaid de forma mais robusta
+MERMAID_BLOCK_PATTERN = re.compile(
+    r"```mermaid[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```",
+    re.IGNORECASE,
+)
 PRINT_TOKEN_PATTERN = re.compile(r"PRINT_SLOT_(\d+)_TOKEN")
 
 
@@ -510,7 +514,7 @@ def replace_mermaid_blocks(md_text: str) -> Tuple[str, List[Path]]:
     generated_paths: List[Path] = []
 
     def repl(match: re.Match) -> str:
-        code = match.group(2)
+        code = match.group(1)  # Grupo 1 agora contém o código do diagrama
         if code is None:
             return ''
         diagram_code = code.strip()
