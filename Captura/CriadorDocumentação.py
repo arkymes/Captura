@@ -112,7 +112,7 @@ def _deduce_defaults_from_title(title_text: str) -> dict:
         "doc_revision": "1.0",
         "elaboracao": "A definir",
         "aprovacao": "A definir",
-        "empresa": "Veronese Transportes",
+        "empresa": "Empresa",
     }
     return defaults
 
@@ -156,7 +156,7 @@ def load_metadata(title_text: str) -> dict:
         for key, value in normalized.items():
             if value is not None:
                 metadata[key] = str(value)
-    metadata.setdefault("empresa", "Veronese Transportes")
+    metadata.setdefault("empresa", "Empresa")
     return metadata
 
 
@@ -180,8 +180,8 @@ def find_logo(layout_assets_dir: Optional[Path] = None) -> Optional[Path]:
     
     # Prioridade 2: Arquivos padrão
     candidates = [
-        WORKDIR / "Logo_veronese.png",
-        WORKDIR / "logo_veronese.png",
+        WORKDIR / "Logo_empresa.png",
+        WORKDIR / "logo_empresa.png",
         WORKDIR / "logo.png",
     ]
     for candidate in candidates:
@@ -543,35 +543,67 @@ def replace_mermaid_blocks(md_text: str) -> Tuple[str, List[Path]]:
 
 
 def _parse_node_token(token: str) -> Tuple[str, str, str]:
+    """
+    Parseia um token de nó Mermaid e extrai: node_id, label, shape.
+    
+    Exemplos:
+        - "Start([Início])" -> ('Start', 'Início', 'circle')
+        - "Config[Carregar Configurações]" -> ('Config', 'Carregar Configurações', 'rect')
+        - "Classify[Classificar Transações <br/>(Regex no Histórico)]" -> ('Classify', 'Classificar Transações (Regex no Histórico)', 'rect')
+    """
     token = token.strip()
     if not token:
         return '', '', 'rect'
 
+    # Lista de delimitadores ordenados do mais específico para o menos específico
+    # O formato é: (start_delim, end_delim, shape_name)
     shapes = [
-        ('[[', ']]', 'rect'),
-        ('[', ']', 'rect'),
-        ('{{', '}}', 'circle'),
-        ('{', '}', 'diamond'),
-        ('((', '))', 'circle'),
-        ('(', ')', 'round'),
+        ('([', '])', 'circle'),   # Stadium shape - usado para início/fim
+        ('[[', ']]', 'rect'),     # Subroutine
+        ('{{', '}}', 'circle'),   # Hexagon
+        ('((', '))', 'circle'),   # Circle
+        ('{', '}', 'diamond'),    # Diamond/Decision
+        ('[', ']', 'rect'),       # Rectangle
+        ('(', ')', 'round'),      # Rounded rectangle
     ]
+    
     node_id = token
     label = token
     shape = 'rect'
-    for start, end, shape_name in shapes:
-        if start in token and end in token and token.find(start) < token.rfind(end):
-            idx_start = token.find(start)
-            idx_end = token.rfind(end)
-            node_id = token[:idx_start].strip()
-            label = token[idx_start + len(start):idx_end].strip()
-            shape = shape_name
-            break
+    
+    # Procura o primeiro delimitador de abertura que aparece no token
+    # e encontra seu correspondente delimitador de fechamento no FINAL do token
+    for start_delim, end_delim, shape_name in shapes:
+        # Verifica se o token contém o delimitador de abertura
+        start_idx = token.find(start_delim)
+        if start_idx == -1:
+            continue
+            
+        # Verifica se o token TERMINA com o delimitador de fechamento correspondente
+        if not token.endswith(end_delim):
+            continue
+        
+        # Extrai o node_id (parte antes do delimitador de abertura)
+        node_id = token[:start_idx].strip()
+        
+        # Extrai o label (conteúdo entre os delimitadores)
+        label_start = start_idx + len(start_delim)
+        label_end = len(token) - len(end_delim)
+        label = token[label_start:label_end].strip()
+        
+        shape = shape_name
+        break
     else:
         # Se não encontrou delimitadores específicos, tenta separar por espaço
         parts = token.split()
         if parts:
             node_id = parts[0].strip()
             label = ' '.join(parts[1:]).strip() or node_id
+
+    # Limpa tags HTML do label (como <br/>)
+    label = re.sub(r'<br\s*/?>', ' ', label)
+    # Remove espaços duplicados
+    label = re.sub(r'\s+', ' ', label).strip()
 
     if not node_id:
         node_id = label
