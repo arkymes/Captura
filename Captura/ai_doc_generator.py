@@ -24,7 +24,16 @@ import time
 
 
 APP_TITLE = "Captura"
-MODEL_ID = "gemini-2.5-pro"
+# Ordem padrão: mais forte -> mais leve. Pode ser sobrescrita por:
+# - env: GEMINI_MODELS="model1,model2,..." ou GEMINI_MODEL="model"
+# - secrets.toml: GEMINI_MODELS = "model1,model2" ou GEMINI_MODEL = "model"
+DEFAULT_MODEL_CHAIN = [
+    "gemini-3-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    # Modelo TTS não é ideal para geração de documentação, mas está na lista do print.
+    "gemini-2.5-flash-tts",
+]
 
 
 # ===============================
@@ -254,6 +263,125 @@ Para gerar a documentação com IA, você precisa de uma API Key do Google AI St
 # ===============================
 # Gemini interaction
 # ===============================
+
+def _get_model_chain() -> list[str]:
+    """Retorna a cadeia de fallback (mais forte -> mais leve)."""
+    # 1) env tem precedência
+    env_models = (os.environ.get("GEMINI_MODELS") or "").strip()
+    env_model = (os.environ.get("GEMINI_MODEL") or "").strip()
+
+    if env_models:
+        chain = [m.strip() for m in env_models.split(",") if m.strip()]
+        return chain or DEFAULT_MODEL_CHAIN
+    if env_model:
+        return [env_model]
+
+    # 2) secrets (Streamlit)
+    try:
+        secrets_models = (st.secrets.get("GEMINI_MODELS") or "").strip()
+        secrets_model = (st.secrets.get("GEMINI_MODEL") or "").strip()
+        if secrets_models:
+            chain = [m.strip() for m in secrets_models.split(",") if m.strip()]
+            return chain or DEFAULT_MODEL_CHAIN
+        if secrets_model:
+            return [secrets_model]
+    except Exception:
+        pass
+
+    return DEFAULT_MODEL_CHAIN
+
+
+def _extract_status_code(exc: Exception) -> Optional[int]:
+    # google.genai.errors costuma expor status_code ou code
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int):
+        return code
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    return None
+
+
+def _should_try_next_model(exc: Exception) -> bool:
+    """Decide se vale tentar o próximo modelo.
+
+    Regra prática: para erros de rede/servidor/quota/modelo indisponível,
+    faz sentido tentar fallback. Para erros locais, não.
+    """
+    if isinstance(exc, (genai_errors.ServerError, genai_errors.ClientError)):
+        status_code = _extract_status_code(exc)
+        # 400/404 podem ser modelo inválido; 429 quota; 500/503 instabilidade
+        if status_code in (400, 404, 408, 409, 429, 500, 502, 503, 504):
+            return True
+        # Sem status_code: ainda pode ser transitório
+        return True
+
+    # Fallback genérico: se a mensagem sugerir problema no modelo
+    msg = str(exc).lower()
+    modelish = any(
+        token in msg
+        for token in (
+            "model",
+            "not found",
+            "unsupported",
+            "unavailable",
+            "overloaded",
+            "resource_exhausted",
+            "quota",
+            "rate",
+            "503",
+            "429",
+        )
+    )
+    return modelish
+
+
+def _generate_markdown_with_model(
+    *,
+    client: genai.Client,
+    model_id: str,
+    contents: list,
+    cfg: types.GenerateContentConfig,
+    progress: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Gera texto via Gemini com streaming e fallback para não-streaming."""
+    output_md: list[str] = []
+    stream_error: Optional[Exception] = None
+    try:
+        last_yield = time.time()
+        total = 0
+        for chunk in client.models.generate_content_stream(
+            model=model_id,
+            contents=contents,
+            config=cfg,
+        ):
+            if getattr(chunk, "text", None):
+                t = chunk.text
+                output_md.append(t)
+                total += len(t)
+                if progress and (time.time() - last_yield) >= 1.0:
+                    progress(f"IA gerando o .md (stream • {model_id})… {total} caracteres recebidos")
+                    last_yield = time.time()
+    except Exception as e:
+        stream_error = e
+        if progress:
+            progress(f"Stream falhou ({model_id}): {e}. Tentando modo não-streaming…")
+
+    if stream_error is not None and not output_md:
+        resp = client.models.generate_content(
+            model=model_id,
+            contents=contents,
+            config=cfg,
+        )
+        text = _safe_extract_text(resp)
+        if not text:
+            raise RuntimeError(f"Resposta vazia da IA (modo não-streaming • {model_id}).") from stream_error
+        return _clean_markdown_response(text)
+
+    if not output_md:
+        raise RuntimeError(f"A IA não retornou conteúdo (stream • {model_id}).")
+
+    return _clean_markdown_response("".join(output_md))
 
 def _normalize_file_state(state_obj) -> str:
     """Return a normalized file state label like 'ACTIVE', 'FAILED', 'PROCESSING'.
@@ -520,49 +648,31 @@ Gere um arquivo Markdown (.md) contendo o documento completo no formato o .md de
     )
     
 
-    # Geração com resiliência: tenta streaming e faz fallback para não-stream se a conexão cair
+    # Geração com fallback de modelos (mais forte -> mais leve)
+    model_chain = _get_model_chain()
+    last_error: Optional[Exception] = None
     if progress:
         progress("2/3 • Gerando o .md com a IA…")
-    output_md = []
-    stream_error = None
-    try:
-        last_yield = time.time()
-        total = 0
-        for chunk in client.models.generate_content_stream(
-            model=MODEL_ID,
-            contents=contents,
-            config=cfg,
-        ):
-            if getattr(chunk, "text", None):
-                t = chunk.text
-                output_md.append(t)
-                total += len(t)
-                if progress and (time.time() - last_yield) >= 1.0:
-                    progress(f"IA gerando o .md (stream)… {total} caracteres recebidos")
-                    last_yield = time.time()
-    except Exception as e:
-        stream_error = e
-        if progress:
-            progress(f"Conexão do stream caiu: {e}. Tentando modo sem streaming…")
 
-    if stream_error is not None and not output_md:
-        # Fallback: chamada não-streaming
+    for idx, model_id in enumerate(model_chain, start=1):
         try:
             if progress:
-                progress("IA gerando o .md (modo não-streaming)...")
-            resp = client.models.generate_content(
-                model=MODEL_ID,
+                progress(f"Usando modelo {idx}/{len(model_chain)}: {model_id}")
+            return _generate_markdown_with_model(
+                client=client,
+                model_id=model_id,
                 contents=contents,
-                config=cfg,
+                cfg=cfg,
+                progress=progress,
             )
-            text = _safe_extract_text(resp)
-            if not text:
-                raise RuntimeError("Resposta vazia da IA (modo não-streaming).")
-            return _clean_markdown_response(text)
-        except Exception as e2:
-            raise RuntimeError(f"Falha ao gerar conteúdo (fallback): {e2}") from stream_error
+        except Exception as exc:
+            last_error = exc
+            if progress:
+                progress(f"Falha com {model_id}: {exc}")
+            if not _should_try_next_model(exc):
+                break
 
-    return _clean_markdown_response("".join(output_md))
+    raise RuntimeError(f"Falha ao gerar conteúdo após tentar modelos: {model_chain}. Último erro: {last_error}")
 
 
 def _get_output_dir() -> Path:
@@ -1179,39 +1289,30 @@ def main():
                 )
 
                 try:
-                    output_md = []
-                    try:
-                        for chunk in client.models.generate_content_stream(
-                            model=MODEL_ID,
-                            contents=contents,
-                            config=cfg,
-                        ):
-                            if getattr(chunk, "text", None):
-                                output_md.append(chunk.text)
-                    except genai_errors.ServerError as exc:  # type: ignore[attr-defined]
-                        error_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-                        if error_code == 503:
-                            wait_seconds = 6
-                            status.write(
-                                "O modelo está sobrecarregado (503). Aguardando alguns segundos antes de tentar novamente em modo não streaming..."
-                            )
-                            time.sleep(wait_seconds)
-                            resp = client.models.generate_content(
-                                model=MODEL_ID,
+                    model_chain = _get_model_chain()
+                    last_error: Optional[Exception] = None
+                    for idx, model_id in enumerate(model_chain, start=1):
+                        try:
+                            status.write(f"Modelo {idx}/{len(model_chain)}: {model_id}")
+                            st.session_state.generated_md = _generate_markdown_with_model(
+                                client=client,
+                                model_id=model_id,
                                 contents=contents,
-                                config=cfg,
+                                cfg=cfg,
+                                progress=None,
                             )
-                            text = _safe_extract_text(resp)
-                            if not text:
-                                raise RuntimeError("Resposta vazia da IA após fallback não-streaming.") from exc
-                            output_md = [text]
-                        else:
-                            raise
+                            last_error = None
+                            break
+                        except Exception as exc:
+                            last_error = exc
+                            status.write(f"Falha com {model_id}: {exc}")
+                            if not _should_try_next_model(exc):
+                                break
 
-                    if not output_md:
-                        raise RuntimeError("A IA não retornou conteúdo após as tentativas de revisão.")
-
-                    st.session_state.generated_md = _clean_markdown_response("".join(output_md))
+                    if last_error is not None:
+                        raise RuntimeError(
+                            f"A IA não retornou conteúdo após tentar modelos: {model_chain}. Último erro: {last_error}"
+                        )
                 except Exception as gen_error:
                     status.update(label=f"Falha ao gerar revisão do .md: {gen_error}", state="error")
                     st.error(f"Falha ao revisar o documento: {gen_error}")
