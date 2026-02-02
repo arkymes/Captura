@@ -1067,45 +1067,48 @@ def main():
         if not api_key:
             st.error("Informe a Gemini API Key na barra lateral.")
             return
-        if not video_file:
-            st.error("Envie um arquivo de vídeo.")
+        if not video_file and not uploaded_md:
+            st.error("Envie um vídeo ou um arquivo .md.")
             return
-        try:
-            video_bytes = video_file.read()
-            video_mime = _detect_mime(video_file.name)
-            transcript_bytes = transcript_file.read() if transcript_file else None
-            transcript_mime = _detect_mime(transcript_file.name) if transcript_file else None
+        video_bytes = video_file.read() if video_file else None
+        video_mime = _detect_mime(video_file.name) if video_file else None
+        transcript_bytes = transcript_file.read() if transcript_file else None
+        transcript_mime = _detect_mime(transcript_file.name) if transcript_file else None
 
+        try:
             with st.status("Processando documentação...", state="running") as status:
                 out_dir = _get_output_dir()
-                # 1/3: Preparar vídeo (usar bytes diretamente se upload, ou path se fornecido)
-                status.write("1/3 • Preparando vídeo...")
-                try:
-                    size_mb = (len(video_bytes) / (1024*1024)) if video_bytes else 0
-                    status.write(f"Tamanho do vídeo: {size_mb:.1f} MB. O upload/processamento pela IA pode levar alguns minutos…")
-                except Exception:
-                    size_mb = 0
-                # Preparar vídeo em temp se necessário para extração de prints
-                video_temp_path = None
-                if video_bytes:
-                    # Upload: salvar em temp
-                    with tempfile.NamedTemporaryFile(suffix=Path(video_file.name).suffix if video_file else ".mp4", delete=False) as tmp:
-                        tmp.write(video_bytes)
-                        video_temp_path = Path(tmp.name)
-                elif st.session_state.input_video_path:
-                    # Path fornecido: usar diretamente
-                    video_temp_path = Path(st.session_state.input_video_path)
-                    if not video_temp_path.exists():
-                        status.update(label=f"Arquivo de vídeo não encontrado: {video_temp_path}", state="error")
-                        return
-                else:
+            # 1/3: Preparar vídeo (usar bytes diretamente se upload, ou path se fornecido)
+            status.write("1/3 • Preparando vídeo...")
+            try:
+                size_mb = (len(video_bytes) / (1024*1024)) if video_bytes else 0
+                status.write(f"Tamanho do vídeo: {size_mb:.1f} MB. O upload/processamento pela IA pode levar alguns minutos…")
+            except Exception:
+                size_mb = 0
+            # Preparar vídeo em temp se necessário para extração de prints
+            video_temp_path = None
+            if video_bytes:
+                # Upload: salvar em temp
+                with tempfile.NamedTemporaryFile(suffix=Path(video_file.name).suffix if video_file else ".mp4", delete=False) as tmp:
+                    tmp.write(video_bytes)
+                    video_temp_path = Path(tmp.name)
+            elif st.session_state.input_video_path:
+                # Path fornecido: usar diretamente
+                video_temp_path = Path(st.session_state.input_video_path)
+                if not video_temp_path.exists():
+                    status.update(label=f"Arquivo de vídeo não encontrado: {video_temp_path}", state="error")
+                    return
+            else:
+                if not uploaded_md:
                     status.update(label="Vídeo não fornecido.", state="error")
                     return
 
-                # Persistir para uso em "Aplicar alterações" (revisão)
+            # Persistir para uso em "Aplicar alterações" (revisão)
+            if video_temp_path:
                 st.session_state.last_video_path = str(video_temp_path)
 
                 # 2/3: Obter .md (IA ou arquivo enviado)
+                st.session_state.used_uploaded_md = uploaded_md is not None
                 if uploaded_md is not None:
                     status.write("2/3 • Carregando .md fornecido...")
                     try:
