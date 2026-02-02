@@ -1076,13 +1076,12 @@ def main():
         transcript_mime = _detect_mime(transcript_file.name) if transcript_file else None
 
         try:
-            with st.status("Processando documentação...", state="running") as status:
-                out_dir = _get_output_dir()
+            out_dir = _get_output_dir()
             # 1/3: Preparar vídeo (usar bytes diretamente se upload, ou path se fornecido)
-            status.write("1/3 • Preparando vídeo...")
+            st.info("1/3 • Preparando vídeo...")
             try:
                 size_mb = (len(video_bytes) / (1024*1024)) if video_bytes else 0
-                status.write(f"Tamanho do vídeo: {size_mb:.1f} MB. O upload/processamento pela IA pode levar alguns minutos…")
+                st.info(f"Tamanho do vídeo: {size_mb:.1f} MB. O upload/processamento pela IA pode levar alguns minutos…")
             except Exception:
                 size_mb = 0
             # Preparar vídeo em temp se necessário para extração de prints
@@ -1096,11 +1095,11 @@ def main():
                 # Path fornecido: usar diretamente
                 video_temp_path = Path(st.session_state.input_video_path)
                 if not video_temp_path.exists():
-                    status.update(label=f"Arquivo de vídeo não encontrado: {video_temp_path}", state="error")
+                    st.error(f"Arquivo de vídeo não encontrado: {video_temp_path}")
                     return
             else:
                 if not uploaded_md:
-                    status.update(label="Vídeo não fornecido.", state="error")
+                    st.error("Vídeo não fornecido.")
                     return
 
             # Persistir para uso em "Aplicar alterações" (revisão)
@@ -1110,15 +1109,15 @@ def main():
                 # 2/3: Obter .md (IA ou arquivo enviado)
                 st.session_state.used_uploaded_md = uploaded_md is not None
                 if uploaded_md is not None:
-                    status.write("2/3 • Carregando .md fornecido...")
+                    st.info("2/3 • Carregando .md fornecido...")
                     try:
                         md_text = uploaded_md.read().decode("utf-8", errors="ignore")
                     except Exception as dec_exc:
-                        status.update(label=f"Falha ao ler o .md enviado: {dec_exc}", state="error")
+                        st.error(f"Falha ao ler o .md enviado: {dec_exc}")
                         return
                     st.session_state.generated_md = _clean_markdown_response(md_text)
                 else:
-                    status.write("2/3 • Gerando o .md com a IA...")
+                    st.info("2/3 • Gerando o .md com a IA...")
                     # Choose active template: if 'Customizado' selected and custom exists, use it;
                     # otherwise use the selected internal template (fallback to model_rpa)
                     if st.session_state.internal_template_key == "Customizado" and st.session_state.custom_template_text.strip():
@@ -1142,7 +1141,7 @@ def main():
                         transcript_name=(transcript_file.name if transcript_file else None),
                         transcript_bytes=transcript_bytes,
                         transcript_mime=transcript_mime,
-                        progress=lambda msg: status.write(msg),
+                        progress=lambda msg: st.info(msg),
                         extra_notes=(st.session_state.extra_notes.strip() or None),
                         active_template_text=selected_template_text,
                     )
@@ -1192,10 +1191,10 @@ def main():
                 layout_tmp_dir = _prepare_layout_temp_dir()
 
                 # 3/3: Rodar formatação DOCX
-                status.write("3/3 • Formatando DOCX (pode levar alguns minutos)...")
+                st.info("3/3 • Formatando DOCX (pode levar alguns minutos)...")
                 generator_script = out_dir / "Captura" / "CriadorDocumentação.py"
                 if not generator_script.exists():
-                    status.update(label="CriadorDocumentação.py não encontrado em GeraçãoDOc.", state="error")
+                    st.error("CriadorDocumentação.py não encontrado em GeraçãoDOc.")
                     return
 
                 env = os.environ.copy()
@@ -1216,25 +1215,25 @@ def main():
                             timeout=1800,
                         )
                     except Exception as ex:
-                        status.update(label=f"Falha ao executar o gerador de DOCX: {ex}", state="error")
+                        st.error(f"Falha ao executar o gerador de DOCX: {ex}")
                         return
 
                     if proc.returncode != 0:
-                        status.update(label="Falha ao gerar o DOCX.", state="error")
+                        st.error("Falha ao gerar o DOCX.")
                         st.code((proc.stdout.decode('utf-8', errors='ignore') or "") + "\n" + (proc.stderr.decode('utf-8', errors='ignore') or ""), language="bash")
                         return
 
                     # DOCX vem via stdout como bytes
                     docx_bytes = proc.stdout
                     if not docx_bytes:
-                        status.update(label="DOCX não gerado.", state="error")
+                        st.error("DOCX não gerado.")
                         return
                     st.session_state.last_docx_bytes = docx_bytes
                     st.session_state.last_docx_b64 = base64.b64encode(docx_bytes).decode("ascii")
                     st.session_state.last_docx_name = "documento.docx"
                     st.session_state.trigger_download = True
                     st.session_state.download_data_url = ""
-                    status.update(label="Concluído! Iniciando download do DOCX...", state="complete")
+                    st.success("Concluído! Iniciando download do DOCX...")
 
                 # Atualiza histórico do chat (resumo)
                 st.session_state.chat_history.append({"role": "user", "text": f"Solicitação inicial com vídeo '{video_file.name}'"})
