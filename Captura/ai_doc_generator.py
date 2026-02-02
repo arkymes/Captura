@@ -1085,6 +1085,7 @@ def main():
                 status.write(f"Tamanho do vídeo: {size_mb:.1f} MB. O upload/processamento pela IA pode levar alguns minutos…")
             except Exception:
                 size_mb = 0
+            st.write("Debug: after 1/3")
             # Preparar vídeo em temp se necessário para extração de prints
             video_temp_path = None
             if video_bytes:
@@ -1117,6 +1118,7 @@ def main():
                         status.update(label=f"Falha ao ler o .md enviado: {dec_exc}", state="error")
                         return
                     st.session_state.generated_md = _clean_markdown_response(md_text)
+                st.write("Debug: after md load")
                 else:
                     status.write("2/3 • Gerando o .md com a IA...")
                     # Choose active template: if 'Customizado' selected and custom exists, use it;
@@ -1191,6 +1193,7 @@ def main():
                     return None
                 layout_tmp_dir = _prepare_layout_temp_dir()
 
+                st.write("Debug: before DOCX")
                 # 3/3: Rodar formatação DOCX
                 status.write("3/3 • Formatando DOCX (pode levar alguns minutos)...")
                 generator_script = out_dir / "Captura" / "CriadorDocumentação.py"
