@@ -1076,12 +1076,13 @@ def main():
         transcript_mime = _detect_mime(transcript_file.name) if transcript_file else None
 
         try:
-            out_dir = _get_output_dir()
+            with st.status("Processando documentação...", state="running") as status:
+                out_dir = _get_output_dir()
             # 1/3: Preparar vídeo (usar bytes diretamente se upload, ou path se fornecido)
-            st.info("1/3 • Preparando vídeo...")
+            status.write("1/3 • Preparando vídeo...")
             try:
                 size_mb = (len(video_bytes) / (1024*1024)) if video_bytes else 0
-                st.info(f"Tamanho do vídeo: {size_mb:.1f} MB. O upload/processamento pela IA pode levar alguns minutos…")
+                status.write(f"Tamanho do vídeo: {size_mb:.1f} MB. O upload/processamento pela IA pode levar alguns minutos…")
             except Exception:
                 size_mb = 0
             # Preparar vídeo em temp se necessário para extração de prints
@@ -1095,151 +1096,153 @@ def main():
                 # Path fornecido: usar diretamente
                 video_temp_path = Path(st.session_state.input_video_path)
                 if not video_temp_path.exists():
-                    st.error(f"Arquivo de vídeo não encontrado: {video_temp_path}")
+                    status.update(label=f"Arquivo de vídeo não encontrado: {video_temp_path}", state="error")
                     return
             else:
                 if not uploaded_md:
-                    st.error("Vídeo não fornecido.")
+                    status.update(label="Vídeo não fornecido.", state="error")
                     return
 
             # Persistir para uso em "Aplicar alterações" (revisão)
             if video_temp_path:
                 st.session_state.last_video_path = str(video_temp_path)
 
-                # 2/3: Obter .md (IA ou arquivo enviado)
-                st.session_state.used_uploaded_md = uploaded_md is not None
-                if uploaded_md is not None:
-                    st.info("2/3 • Carregando .md fornecido...")
-                    try:
-                        md_text = uploaded_md.read().decode("utf-8", errors="ignore")
-                    except Exception as dec_exc:
-                        st.error(f"Falha ao ler o .md enviado: {dec_exc}")
-                        return
-                    st.session_state.generated_md = _clean_markdown_response(md_text)
+            # 2/3: Obter .md (IA ou arquivo enviado)
+            st.session_state.used_uploaded_md = uploaded_md is not None
+            if uploaded_md is not None:
+                status.write("2/3 • Carregando .md fornecido...")
+                try:
+                    md_text = uploaded_md.read().decode("utf-8", errors="ignore")
+                except Exception as dec_exc:
+                    status.update(label=f"Falha ao ler o .md enviado: {dec_exc}", state="error")
+                    return
+                st.session_state.generated_md = _clean_markdown_response(md_text)
+            else:
+                status.write("2/3 • Gerando o .md com a IA...")
+                # Choose active template: if 'Customizado' selected and custom exists, use it;
+                # otherwise use the selected internal template (fallback to model_rpa)
+                if st.session_state.internal_template_key == "Customizado" and st.session_state.custom_template_text.strip():
+                    selected_template_text = st.session_state.custom_template_text.strip()
                 else:
-                    st.info("2/3 • Gerando o .md com a IA...")
-                    # Choose active template: if 'Customizado' selected and custom exists, use it;
-                    # otherwise use the selected internal template (fallback to model_rpa)
-                    if st.session_state.internal_template_key == "Customizado" and st.session_state.custom_template_text.strip():
-                        selected_template_text = st.session_state.custom_template_text.strip()
-                    else:
-                        # Build internal map again (guards against code moves)
-                        internal_template_map = {
-                            name: getattr(internal_models, name)
-                            for name in dir(internal_models)
-                            if name.startswith("model_") and isinstance(getattr(internal_models, name), str)
-                        }
-                        key = st.session_state.internal_template_key if st.session_state.internal_template_key != "Customizado" else ("model_rpa" if "model_rpa" in internal_template_map else (next(iter(internal_template_map.keys()), "")))
-                        selected_template_text = internal_template_map.get(key, "")
-                    md = run_generation(
-                        api_key=api_key,
-                        video_name=video_file.name if video_file else "video.mp4",
-                        video_mime=video_mime,
-                        video_path=video_temp_path,
-                        video_bytes=video_bytes,
-                        video_size_mb=float(size_mb) if size_mb else None,
-                        transcript_name=(transcript_file.name if transcript_file else None),
-                        transcript_bytes=transcript_bytes,
-                        transcript_mime=transcript_mime,
-                        progress=lambda msg: st.info(msg),
-                        extra_notes=(st.session_state.extra_notes.strip() or None),
-                        active_template_text=selected_template_text,
-                    )
-                    st.session_state.generated_md = _clean_markdown_response(md)
-                # Não salvar .md em arquivo; manter em memória
-
-                _write_doc_metadata(
-                    out_dir,
-                    st.session_state.doc_elaboracao.strip(),
-                    st.session_state.doc_aprovacao.strip(),
+                    # Build internal map again (guards against code moves)
+                    internal_template_map = {
+                        name: getattr(internal_models, name)
+                        for name in dir(internal_models)
+                        if name.startswith("model_") and isinstance(getattr(internal_models, name), str)
+                    }
+                    key = st.session_state.internal_template_key if st.session_state.internal_template_key != "Customizado" else ("model_rpa" if "model_rpa" in internal_template_map else (next(iter(internal_template_map.keys()), "")))
+                    selected_template_text = internal_template_map.get(key, "")
+                md = run_generation(
+                    api_key=api_key,
+                    video_name=video_file.name if video_file else "video.mp4",
+                    video_mime=video_mime,
+                    video_path=video_temp_path,
+                    video_bytes=video_bytes,
+                    video_size_mb=float(size_mb) if size_mb else None,
+                    transcript_name=(transcript_file.name if transcript_file else None),
+                    transcript_bytes=transcript_bytes,
+                    transcript_mime=transcript_mime,
+                    progress=lambda msg: status.write(msg),
+                    extra_notes=(st.session_state.extra_notes.strip() or None),
+                    active_template_text=selected_template_text,
                 )
+                st.session_state.generated_md = _clean_markdown_response(md)
 
-                # Preparar assets de layout em diretório temporário (não salvar no projeto)
-                def _prepare_layout_temp_dir() -> Optional[Path]:
-                    tmp_dir = Path(tempfile.mkdtemp(prefix="layout_assets_"))
-                    wrote = False
-                    try:
-                        if st.session_state.get("layout_logo_data"):
-                            name = st.session_state.get("layout_logo_filename") or "logo.png"
-                            (tmp_dir / f"logo_{name}").write_bytes(st.session_state["layout_logo_data"])
-                            wrote = True
-                        if st.session_state.get("layout_separator_data"):
-                            name = st.session_state.get("layout_separator_filename") or "separator.png"
-                            (tmp_dir / f"separator_{name}").write_bytes(st.session_state["layout_separator_data"])
-                            wrote = True
-                        if st.session_state.get("layout_footer_banner_data"):
-                            name = st.session_state.get("layout_footer_banner_filename") or "footer.png"
-                            (tmp_dir / f"footer_{name}").write_bytes(st.session_state["layout_footer_banner_data"])
-                            wrote = True
-                        # Opcional: salvar JSON informativo
-                        cfg = {
-                            "company_name": st.session_state.get("layout_company_name", ""),
-                            "logo_filename": st.session_state.get("layout_logo_filename"),
-                            "separator_filename": st.session_state.get("layout_separator_filename"),
-                            "footer_banner_filename": st.session_state.get("layout_footer_banner_filename"),
-                        }
-                        (tmp_dir / "layout_config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-                    except Exception:
-                        pass
-                    if wrote:
-                        return tmp_dir
-                    try:
-                        shutil.rmtree(tmp_dir, ignore_errors=True)
-                    except Exception:
-                        pass
-                    return None
-                layout_tmp_dir = _prepare_layout_temp_dir()
+            # Não salvar .md em arquivo; manter em memória
 
-                # 3/3: Rodar formatação DOCX
-                st.info("3/3 • Formatando DOCX (pode levar alguns minutos)...")
-                generator_script = out_dir / "Captura" / "CriadorDocumentação.py"
-                if not generator_script.exists():
-                    st.error("CriadorDocumentação.py não encontrado em GeraçãoDOc.")
+            _write_doc_metadata(
+                out_dir,
+                st.session_state.doc_elaboracao.strip(),
+                st.session_state.doc_aprovacao.strip(),
+            )
+
+            # Preparar assets de layout em diretório temporário (não salvar no projeto)
+            def _prepare_layout_temp_dir() -> Optional[Path]:
+                tmp_dir = Path(tempfile.mkdtemp(prefix="layout_assets_"))
+                wrote = False
+                try:
+                    if st.session_state.get("layout_logo_data"):
+                        name = st.session_state.get("layout_logo_filename") or "logo.png"
+                        (tmp_dir / f"logo_{name}").write_bytes(st.session_state["layout_logo_data"])
+                        wrote = True
+                    if st.session_state.get("layout_separator_data"):
+                        name = st.session_state.get("layout_separator_filename") or "separator.png"
+                        (tmp_dir / f"separator_{name}").write_bytes(st.session_state["layout_separator_data"])
+                        wrote = True
+                    if st.session_state.get("layout_footer_banner_data"):
+                        name = st.session_state.get("layout_footer_banner_filename") or "footer.png"
+                        (tmp_dir / f"footer_{name}").write_bytes(st.session_state["layout_footer_banner_data"])
+                        wrote = True
+                    # Opcional: salvar JSON informativo
+                    cfg = {
+                        "company_name": st.session_state.get("layout_company_name", ""),
+                        "logo_filename": st.session_state.get("layout_logo_filename"),
+                        "separator_filename": st.session_state.get("layout_separator_filename"),
+                        "footer_banner_filename": st.session_state.get("layout_footer_banner_filename"),
+                    }
+                    (tmp_dir / "layout_config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+                if wrote:
+                    return tmp_dir
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+                return None
+            layout_tmp_dir = _prepare_layout_temp_dir()
+
+            # 3/3: Rodar formatação DOCX
+            status.write("3/3 • Formatando DOCX (pode levar alguns minutos)...")
+            generator_script = out_dir / "Captura" / "CriadorDocumentação.py"
+            if not generator_script.exists():
+                status.update(label="CriadorDocumentação.py não encontrado em GeraçãoDOc.", state="error")
+                return
+
+            env = os.environ.copy()
+            if video_temp_path:
+                env["INPUT_VIDEO_PATH"] = str(video_temp_path)
+            if layout_tmp_dir and layout_tmp_dir.exists():
+                env["LAYOUT_ASSETS_DIR"] = str(layout_tmp_dir)
+            # Usar diretório temporário para outputs
+            with tempfile.TemporaryDirectory() as temp_output_dir:
+                env["OUTPUT_DIR"] = temp_output_dir
+                try:
+                    proc = subprocess.run(
+                        [sys.executable, str(generator_script)],
+                        cwd=str(out_dir),
+                        env=env,
+                        input=st.session_state.generated_md.encode('utf-8'),  # Passar md como bytes via stdin
+                        capture_output=True,
+                        text=False,  # Para capturar bytes
+                        timeout=1800,
+                    )
+                except Exception as ex:
+                    status.update(label=f"Falha ao executar o gerador de DOCX: {ex}", state="error")
                     return
 
-                env = os.environ.copy()
-                env["INPUT_VIDEO_PATH"] = str(video_temp_path)
-                if layout_tmp_dir and layout_tmp_dir.exists():
-                    env["LAYOUT_ASSETS_DIR"] = str(layout_tmp_dir)
-                # Usar diretório temporário para outputs
-                with tempfile.TemporaryDirectory() as temp_output_dir:
-                    env["OUTPUT_DIR"] = temp_output_dir
-                    try:
-                        proc = subprocess.run(
-                            [sys.executable, str(generator_script)],
-                            cwd=str(out_dir),
-                            env=env,
-                            input=st.session_state.generated_md.encode('utf-8'),  # Passar md como bytes via stdin
-                            capture_output=True,
-                            text=False,  # Para capturar bytes
-                            timeout=1800,
-                        )
-                    except Exception as ex:
-                        st.error(f"Falha ao executar o gerador de DOCX: {ex}")
-                        return
+                if proc.returncode != 0:
+                    status.update(label="Falha ao gerar o DOCX.", state="error")
+                    st.code((proc.stdout.decode('utf-8', errors='ignore') or "") + "\n" + (proc.stderr.decode('utf-8', errors='ignore') or ""), language="bash")
+                    return
 
-                    if proc.returncode != 0:
-                        st.error("Falha ao gerar o DOCX.")
-                        st.code((proc.stdout.decode('utf-8', errors='ignore') or "") + "\n" + (proc.stderr.decode('utf-8', errors='ignore') or ""), language="bash")
-                        return
+                # DOCX vem via stdout como bytes
+                docx_bytes = proc.stdout
+                if not docx_bytes:
+                    status.update(label="DOCX não gerado.", state="error")
+                    return
+                st.session_state.last_docx_bytes = docx_bytes
+                st.session_state.last_docx_b64 = base64.b64encode(docx_bytes).decode("ascii")
+                st.session_state.last_docx_name = "documento.docx"
+                st.session_state.trigger_download = True
+                st.session_state.download_data_url = ""
+                status.update(label="Concluído! Iniciando download do DOCX...", state="complete")
 
-                    # DOCX vem via stdout como bytes
-                    docx_bytes = proc.stdout
-                    if not docx_bytes:
-                        st.error("DOCX não gerado.")
-                        return
-                    st.session_state.last_docx_bytes = docx_bytes
-                    st.session_state.last_docx_b64 = base64.b64encode(docx_bytes).decode("ascii")
-                    st.session_state.last_docx_name = "documento.docx"
-                    st.session_state.trigger_download = True
-                    st.session_state.download_data_url = ""
-                    st.success("Concluído! Iniciando download do DOCX...")
-
-                # Atualiza histórico do chat (resumo)
-                st.session_state.chat_history.append({"role": "user", "text": f"Solicitação inicial com vídeo '{video_file.name}'"})
-                if st.session_state.extra_notes.strip():
-                    st.session_state.chat_history.append({"role": "user", "text": f"Notas adicionais: {st.session_state.extra_notes.strip()}"})
-                st.session_state.chat_history.append({"role": "ia", "text": "Documento .md gerado e formatado em DOCX (versão 1)."})
+            # Atualiza histórico do chat (resumo)
+            st.session_state.chat_history.append({"role": "user", "text": f"Solicitação inicial com vídeo '{video_file.name if video_file else 'nenhum'}'"})
+            if st.session_state.extra_notes.strip():
+                st.session_state.chat_history.append({"role": "user", "text": f"Notas adicionais: {st.session_state.extra_notes.strip()}"})
+            st.session_state.chat_history.append({"role": "ia", "text": "Documento .md gerado e formatado em DOCX (versão 1)."})
         except Exception as e:
             st.error(f"Falha ao gerar: {e}")
 
