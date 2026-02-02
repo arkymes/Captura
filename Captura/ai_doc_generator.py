@@ -83,6 +83,8 @@ def _init_session_state():
         st.session_state.layout_initializing = False
     if "layout_load_attempts" not in st.session_state:
         st.session_state.layout_load_attempts = 0
+    if "last_video_path" not in st.session_state:
+        st.session_state.last_video_path = ""
 
 
 def _trigger_rerun() -> None:
@@ -90,7 +92,12 @@ def _trigger_rerun() -> None:
     if callable(rerun_fn):
         rerun_fn()
     else:
-        st.experimental_rerun()
+        # Compatibilidade com versões antigas do Streamlit
+        exp_rerun = getattr(st, "experimental_rerun", None)
+        if callable(exp_rerun):
+            exp_rerun()
+        else:
+            raise RuntimeError("Streamlit não possui st.rerun nem st.experimental_rerun.")
 
 
 def _render_layout_config_body(workdir: Path, key_suffix: str) -> None:
@@ -1048,7 +1055,7 @@ def main():
 
     # Main: Uploads
     st.markdown("### Entradas")
-    video_file = st.file_uploader("Vídeo (obrigatório)", type=["mp4", "mov", "avi", "mkv", "webm"], accept_multiple_files=False)
+    video_file = st.file_uploader("Vídeo (opcional se .md for enviado)", type=["mp4", "mov", "avi", "mkv", "webm"], accept_multiple_files=False)
     transcript_file = st.file_uploader("Transcrição (opcional: .vtt ou .txt)", type=["vtt", "txt"], accept_multiple_files=False)
     uploaded_md = st.file_uploader("Arquivo .md (opcional: usar este no lugar da IA)", type=["md"], accept_multiple_files=False)
 
@@ -1082,7 +1089,6 @@ def main():
                 video_temp_path = None
                 if video_bytes:
                     # Upload: salvar em temp
-                    import tempfile
                     with tempfile.NamedTemporaryFile(suffix=Path(video_file.name).suffix if video_file else ".mp4", delete=False) as tmp:
                         tmp.write(video_bytes)
                         video_temp_path = Path(tmp.name)
@@ -1095,6 +1101,9 @@ def main():
                 else:
                     status.update(label="Vídeo não fornecido.", state="error")
                     return
+
+                # Persistir para uso em "Aplicar alterações" (revisão)
+                st.session_state.last_video_path = str(video_temp_path)
 
                 # 2/3: Obter .md (IA ou arquivo enviado)
                 if uploaded_md is not None:
@@ -1269,11 +1278,17 @@ def main():
 
             with st.status("Aplicando alterações e formatando novo DOCX...", state="running") as status:
                 status.write("1/3 • Pedindo revisão do .md à IA...")
+                # Get current template
+                key = st.session_state.internal_template_key if st.session_state.internal_template_key != "Customizado" else ("model_rpa" if "model_rpa" in internal_template_map else (next(iter(internal_template_map.keys()), "")))
+                selected_template_text = internal_template_map.get(key, "")
+                active_template_text = selected_template_text
                 client = genai.Client(api_key=api_key)
                 revised_prompt = (
                     "Aplique as alterações abaixo ao documento Markdown a seguir, mantendo TODAS as regras do padrão R004 e respondendo apenas com o .md completo atualizado.\n\n"
                     f"Alterações solicitadas:\n{change_text}\n\n"
-                    f"Documento atual (.md):\n\n{st.session_state.generated_md}"
+                    f"Documento atual (.md):\n\n{st.session_state.generated_md}\n\n"
+                    f"Modelo de referência (não repetir linha explicativa):\n\n{active_template_text}\n\n"
+                    "Lembre-se de incluir os placeholders de PRINT com timestamps do vídeo."
                 )
                 extra_context = st.session_state.extra_notes.strip()
                 if extra_context:
@@ -1328,6 +1343,8 @@ def main():
                 )
                 # Preparar assets de layout em diretório temporário (não salvar no projeto)
                 def _prepare_layout_temp_dir2() -> Optional[Path]:
+                    import tempfile
+                    from pathlib import Path
                     tmp_dir = Path(tempfile.mkdtemp(prefix="layout_assets_"))
                     wrote = False
                     try:
@@ -1364,7 +1381,15 @@ def main():
                 status.write("2/3 • Formatando novo DOCX...")
                 generator_script = out_dir / "Captura" / "CriadorDocumentação.py"
                 env = os.environ.copy()
-                env["INPUT_VIDEO_PATH"] = str(video_temp_path)  # Usar o vídeo temp
+                # Reutilizar o mesmo vídeo usado na geração (temp upload ou path informado)
+                video_path_for_revision = (
+                    (st.session_state.get("last_video_path") or "").strip()
+                    or (st.session_state.get("input_video_path") or "").strip()
+                )
+                if not video_path_for_revision:
+                    status.update(label="Vídeo não encontrado para formatar o DOCX revisado. Gere o documento novamente informando o vídeo.", state="error")
+                    return
+                env["INPUT_VIDEO_PATH"] = video_path_for_revision
                 if layout_tmp_dir2 and layout_tmp_dir2.exists():
                     env["LAYOUT_ASSETS_DIR"] = str(layout_tmp_dir2)
                 # Usar diretório temporário para outputs
@@ -1404,7 +1429,7 @@ def main():
                 st.session_state.chat_history.append({"role": "user", "text": change_text})
                 st.session_state.chat_history.append({"role": "ia", "text": "Documento atualizado e DOCX reformatado."})
 
-                st.experimental_rerun()
+                _trigger_rerun()
 
         # Histórico de conversa (compacto)
         if st.session_state.chat_history:
