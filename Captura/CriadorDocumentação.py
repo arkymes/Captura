@@ -1619,19 +1619,22 @@ def main(layout_assets_dir: Optional[Path] = None) -> int:
     if not md_text.strip():
         print("[ERRO] Nenhum conteúdo MD fornecido via stdin")
         return 1
-    if not VIDEO_FILE.exists():
-        print(f"[ERRO] Vídeo não encontrado: {VIDEO_FILE}")
-        return 1
+    
+    # Vídeo é opcional - se não existir, prints não serão extraídos
+    video_available = VIDEO_FILE.exists() if _VIDEO_ENV else False
 
     md_processed, occurrences = replace_print_placeholders(md_text)
     md_processed, mermaid_paths = replace_mermaid_blocks(md_processed)
 
-    # Extrai frames
-    for occurrence in occurrences:
-        seconds = parse_timestamp_to_seconds(occurrence.timestamp)
-        ok = extract_frame(VIDEO_FILE, seconds, occurrence.image_path, coords=occurrence.coords)
-        if not ok:
-            print(f"[AVISO] Falha ao capturar {occurrence.timestamp}. Placeholder gerado.")
+    # Extrai frames apenas se vídeo disponível
+    if video_available:
+        for occurrence in occurrences:
+            seconds = parse_timestamp_to_seconds(occurrence.timestamp)
+            ok = extract_frame(VIDEO_FILE, seconds, occurrence.image_path, coords=occurrence.coords)
+            if not ok:
+                print(f"[AVISO] Falha ao capturar {occurrence.timestamp}. Placeholder gerado.")
+    elif occurrences:
+        print(f"[AVISO] Vídeo não disponível. {len(occurrences)} placeholder(s) de print não serão preenchidos com imagens.")
 
     if mermaid_paths:
         print(f"[OK] {len(mermaid_paths)} diagrama(s) Mermaid disponível(is) em: {DIAGRAMS_DIR}")
