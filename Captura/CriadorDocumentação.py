@@ -27,7 +27,7 @@ def clean_text(text: str) -> str:
     return text
 
 from docx import Document  # type: ignore
-from docx.shared import Pt, Inches, Mm  # type: ignore
+from docx.shared import Pt, Inches, Mm, RGBColor  # type: ignore
 from docx.enum.text import WD_ALIGN_PARAGRAPH  # type: ignore
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_ALIGN_VERTICAL  # type: ignore
 from docx.oxml import OxmlElement  # type: ignore
@@ -77,6 +77,12 @@ MERMAID_BLOCK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 PRINT_TOKEN_PATTERN = re.compile(r"PRINT_SLOT_(\d+)_TOKEN")
+
+_CODE_LANG_HINTS = {
+    "python", "py", "bash", "sh", "shell", "powershell", "ps1", "sql", "json",
+    "yaml", "yml", "xml", "html", "css", "javascript", "js", "typescript", "ts",
+    "mermaid", "kql", "text", "plaintext", "cmd", "bat", "toml", "ini",
+}
 
 
 @dataclass
@@ -887,6 +893,13 @@ def build_docx(
     normal_style = doc.styles['Normal']
     normal_style.font.name = 'Calibri'
     normal_style.font.size = Pt(11)
+    try:
+        normal_paragraph = normal_style.paragraph_format
+        normal_paragraph.space_before = Pt(0)
+        normal_paragraph.space_after = Pt(6)
+        normal_paragraph.line_spacing = 1.18
+    except Exception:
+        pass
 
     section = doc.sections[0]
     section.page_height = Mm(297)
@@ -959,6 +972,256 @@ def _add_page_counter(paragraph) -> None:
     slash_run.font.name = 'Calibri'
     slash_run.font.size = Pt(10)
     _add_field(paragraph, 'NUMPAGES')
+
+
+def _normalize_inline_whitespace(text: str) -> str:
+    if not text:
+        return ''
+    collapsed = re.sub(r"[ \t\r\n]+", " ", text.replace('\xa0', ' '))
+    if not collapsed.strip():
+        return ' '
+    return collapsed
+
+
+def _add_paragraph_shading(paragraph, fill_hex: str) -> None:
+    p_pr = paragraph._element.get_or_add_pPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), fill_hex)
+    p_pr.append(shd)
+
+
+def _set_cell_background(cell, fill_hex: str) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), fill_hex)
+    tc_pr.append(shd)
+
+
+def _extract_code_block_payload(code_text: str) -> Tuple[Optional[str], str]:
+    text = (code_text or '').replace('\r\n', '\n').replace('\r', '\n').strip('\n')
+    if not text:
+        return None, ''
+
+    lines = text.split('\n')
+    language: Optional[str] = None
+    if len(lines) >= 2:
+        first = lines[0].strip().lower()
+        if first in _CODE_LANG_HINTS:
+            language = first
+            lines = lines[1:]
+        elif re.fullmatch(r"[a-z0-9_+-]{1,20}", first) and lines[1].startswith(' '):
+            language = first
+            lines = lines[1:]
+
+    return language, '\n'.join(lines).rstrip()
+
+
+def _extract_code_block_text(code_text: str) -> str:
+    _, cleaned = _extract_code_block_payload(code_text)
+    return cleaned
+
+
+def _is_multiline_code_tag(node) -> bool:
+    if not isinstance(node, Tag) or (node.name or '').lower() != 'code':
+        return False
+    code_text = node.get_text() or ''
+    if '\n' in code_text:
+        return True
+    return bool(re.match(r"^[A-Za-z0-9_+-]+\n", code_text))
+
+
+def _has_meaningful_flow_nodes(nodes) -> bool:
+    for node in nodes:
+        if isinstance(node, NavigableString):
+            if _normalize_inline_whitespace(str(node)).strip():
+                return True
+            continue
+
+        if not isinstance(node, Tag):
+            continue
+
+        node_name = (node.name or '').lower()
+        if node_name == 'br':
+            continue
+
+        if node_name == 'img':
+            return True
+
+        if node_name == 'code':
+            if (node.get_text() or '').strip():
+                return True
+            continue
+
+        if node.get_text(' ', strip=True):
+            return True
+
+    return False
+
+
+def _remove_paragraph(paragraph) -> None:
+    parent = paragraph._element.getparent()
+    if parent is not None:
+        parent.remove(paragraph._element)
+
+
+def _new_body_paragraph(doc: Document):
+    paragraph = doc.add_paragraph()
+    paragraph.style = doc.styles['Normal']
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(6)
+    paragraph.paragraph_format.line_spacing = 1.18
+    return paragraph
+
+
+def _new_list_continuation_paragraph(doc: Document, left_indent_pt: float):
+    paragraph = doc.add_paragraph()
+    paragraph.style = doc.styles['Normal']
+    paragraph.paragraph_format.left_indent = Pt(left_indent_pt)
+    paragraph.paragraph_format.first_line_indent = Pt(0)
+    paragraph.paragraph_format.space_before = Pt(1)
+    paragraph.paragraph_format.space_after = Pt(3)
+    paragraph.paragraph_format.line_spacing = 1.12
+    return paragraph
+
+
+def _add_mixed_paragraph_with_code_blocks(doc: Document, paragraph_tag: Tag, content_width_inches: float) -> None:
+    nodes = list(paragraph_tag.children)
+    current_paragraph = _new_body_paragraph(doc)
+
+    for idx, node in enumerate(nodes):
+        prev_is_code = idx > 0 and _is_multiline_code_tag(nodes[idx - 1])
+        next_is_code = idx + 1 < len(nodes) and _is_multiline_code_tag(nodes[idx + 1])
+
+        if isinstance(node, Tag) and (node.name or '').lower() == 'br' and (prev_is_code or next_is_code):
+            continue
+
+        if isinstance(node, NavigableString) and not _normalize_inline_whitespace(str(node)).strip() and (prev_is_code or next_is_code):
+            continue
+
+        if _is_multiline_code_tag(node):
+            if current_paragraph is not None and not current_paragraph.text.strip():
+                _remove_paragraph(current_paragraph)
+            current_paragraph = None
+            _add_code_block(doc, node.get_text(), left_indent_pt=12, right_indent_pt=6)
+
+            if _has_meaningful_flow_nodes(nodes[idx + 1:]):
+                current_paragraph = _new_body_paragraph(doc)
+            continue
+
+        if current_paragraph is None:
+            current_paragraph = _new_body_paragraph(doc)
+
+        _add_runs(doc, current_paragraph, node, content_width_inches)
+
+    if current_paragraph is not None and not current_paragraph.text.strip():
+        _remove_paragraph(current_paragraph)
+
+
+def _add_list_paragraph_with_code_blocks(
+    doc: Document,
+    list_paragraph,
+    paragraph_tag: Tag,
+    content_width_inches: float,
+    level: int,
+    base_indent: int,
+    indent_step: int,
+) -> None:
+    nodes = list(paragraph_tag.children)
+    continuation_indent = base_indent + level * indent_step + 10
+    code_indent = continuation_indent + 2
+    current_paragraph = list_paragraph
+
+    for idx, node in enumerate(nodes):
+        prev_is_code = idx > 0 and _is_multiline_code_tag(nodes[idx - 1])
+        next_is_code = idx + 1 < len(nodes) and _is_multiline_code_tag(nodes[idx + 1])
+
+        if isinstance(node, Tag) and (node.name or '').lower() == 'br' and (prev_is_code or next_is_code):
+            continue
+
+        if isinstance(node, NavigableString) and not _normalize_inline_whitespace(str(node)).strip() and (prev_is_code or next_is_code):
+            continue
+
+        if _is_multiline_code_tag(node):
+            if current_paragraph is not None and current_paragraph is not list_paragraph and not current_paragraph.text.strip():
+                _remove_paragraph(current_paragraph)
+            current_paragraph = None
+            _add_code_block(doc, node.get_text(), left_indent_pt=code_indent, right_indent_pt=4)
+
+            if _has_meaningful_flow_nodes(nodes[idx + 1:]):
+                current_paragraph = _new_list_continuation_paragraph(doc, continuation_indent)
+            continue
+
+        if current_paragraph is None:
+            current_paragraph = _new_list_continuation_paragraph(doc, continuation_indent)
+
+        _add_runs(doc, current_paragraph, node, content_width_inches)
+
+    if current_paragraph is not None and current_paragraph is not list_paragraph and not current_paragraph.text.strip():
+        _remove_paragraph(current_paragraph)
+
+
+def _is_code_only_paragraph(paragraph_tag: Tag) -> bool:
+    children = [
+        child for child in paragraph_tag.children
+        if not (isinstance(child, NavigableString) and not str(child).strip())
+    ]
+    if len(children) != 1:
+        return False
+    code_tag = children[0]
+    if not isinstance(code_tag, Tag) or (code_tag.name or '').lower() != 'code':
+        return False
+    code_text = code_tag.get_text() or ''
+    if '\n' in code_text:
+        return True
+    return bool(re.match(r"^[A-Za-z0-9_+-]+\n", code_text))
+
+
+def _add_code_block(doc: Document, code_text: str, left_indent_pt: float = 12, right_indent_pt: float = 6) -> None:
+    language, cleaned = _extract_code_block_payload(code_text)
+    if not cleaned:
+        return
+
+    paragraph = doc.add_paragraph()
+    paragraph.style = doc.styles['Normal']
+    paragraph.paragraph_format.left_indent = Pt(left_indent_pt)
+    paragraph.paragraph_format.right_indent = Pt(right_indent_pt)
+    paragraph.paragraph_format.space_before = Pt(4)
+    paragraph.paragraph_format.space_after = Pt(8)
+    paragraph.paragraph_format.line_spacing = 1.05
+    _add_paragraph_shading(paragraph, 'F5F5F5')
+
+    if language:
+        lang_run = paragraph.add_run(language.upper())
+        lang_run.bold = True
+        lang_run.font.name = 'Calibri'
+        lang_run.font.size = Pt(8)
+        lang_run.font.color.rgb = RGBColor(105, 105, 105)
+        paragraph.add_run().add_break()
+
+    run = paragraph.add_run(cleaned.replace('\t', '    '))
+    run.font.name = 'Consolas'
+    run.font.size = Pt(9.5)
+    run.font.color.rgb = RGBColor(45, 45, 45)
+
+
+def _add_horizontal_rule(doc: Document) -> None:
+    paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(6)
+    paragraph.paragraph_format.space_after = Pt(6)
+
+    p_pr = paragraph._element.get_or_add_pPr()
+    p_bdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'), 'single')
+    bottom.set(qn('w:sz'), '4')
+    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:color'), 'D0D0D0')
+    p_bdr.append(bottom)
+    p_pr.append(p_bdr)
 
 
 def _resolve_asset_path(src: str) -> Optional[Path]:
@@ -1117,16 +1380,45 @@ def _add_image_to_paragraph(paragraph, img_tag: Tag, content_width_inches: float
         paragraph._element.remove(run._r)
 
 
-def _add_runs(doc: Document, paragraph, node, content_width_inches: float, bold: bool = False, italic: bool = False) -> None:
+def _add_runs(
+    doc: Document,
+    paragraph,
+    node,
+    content_width_inches: float,
+    bold: bool = False,
+    italic: bool = False,
+    code_context: bool = False,
+) -> None:
     if isinstance(node, NavigableString):
-        text = str(node)
-        if not text or not text.strip():
+        raw_text = str(node)
+        if not raw_text:
             return
+
+        if code_context:
+            text = raw_text
+            if not text.strip():
+                return
+        else:
+            text = _normalize_inline_whitespace(raw_text)
+            if not text:
+                return
+            if text == ' ':
+                if not paragraph.runs:
+                    return
+                previous = paragraph.runs[-1].text or ''
+                if not previous or previous[-1].isspace():
+                    return
+
         run = paragraph.add_run(text)
         run.bold = bold
         run.italic = italic
-        run.font.name = 'Calibri'
-        run.font.size = Pt(11)
+        if code_context:
+            run.font.name = 'Consolas'
+            run.font.size = Pt(9.5)
+            run.font.color.rgb = RGBColor(45, 45, 45)
+        else:
+            run.font.name = 'Calibri'
+            run.font.size = Pt(11)
         return
 
     if not isinstance(node, Tag):
@@ -1149,17 +1441,64 @@ def _add_runs(doc: Document, paragraph, node, content_width_inches: float, bold:
         _add_list(doc, node, ordered=(name == 'ol'), content_width_inches=content_width_inches)
         return
 
+    if name == 'code':
+        code_text = node.get_text() or ''
+        if '\n' in code_text:
+            cleaned = _extract_code_block_text(code_text)
+            if cleaned:
+                if paragraph.runs:
+                    previous_text = paragraph.runs[-1].text or ''
+                    if previous_text and not previous_text.endswith('\n'):
+                        paragraph.add_run().add_break()
+                run = paragraph.add_run(cleaned.replace('\t', '    '))
+                run.font.name = 'Consolas'
+                run.font.size = Pt(9.5)
+                run.font.color.rgb = RGBColor(45, 45, 45)
+                paragraph.add_run().add_break()
+            return
+        for child in node.children:
+            _add_runs(
+                doc,
+                paragraph,
+                child,
+                content_width_inches,
+                bold=bold,
+                italic=italic,
+                code_context=True,
+            )
+        return
+
+    if name == 'a':
+        link_text = node.get_text(' ', strip=True)
+        if link_text:
+            run = paragraph.add_run(link_text)
+            run.bold = bold
+            run.italic = italic
+            run.underline = True
+            run.font.name = 'Calibri'
+            run.font.size = Pt(11)
+            run.font.color.rgb = RGBColor(5, 99, 193)
+        return
+
     next_bold = bold or name in {'strong', 'b'}
     next_italic = italic or name in {'em', 'i'}
 
     for child in node.children:
-        _add_runs(doc, paragraph, child, content_width_inches, next_bold, next_italic)
+        _add_runs(
+            doc,
+            paragraph,
+            child,
+            content_width_inches,
+            bold=next_bold,
+            italic=next_italic,
+            code_context=code_context,
+        )
 
 
 def _add_list(doc: Document, list_tag: Tag, ordered: bool, content_width_inches: float, level: int = 0) -> None:
     style_name = 'List Number' if ordered else 'List Bullet'
-    base_indent = 28.35
-    indent_step = 18
+    base_indent = 22
+    indent_step = 16
 
     for item in list_tag.find_all('li', recursive=False):
         meaningful_children = [child for child in item.children if not (isinstance(child, NavigableString) and not str(child).strip())]
@@ -1170,9 +1509,9 @@ def _add_list(doc: Document, list_tag: Tag, ordered: bool, content_width_inches:
         paragraph = doc.add_paragraph(style=style_name)
         paragraph.paragraph_format.left_indent = Pt(base_indent + level * indent_step)
         paragraph.paragraph_format.first_line_indent = Pt(0)
-        paragraph.paragraph_format.space_before = Pt(3)
-        paragraph.paragraph_format.space_after = Pt(6 if level == 0 else 3)
-        paragraph.paragraph_format.line_spacing = 1.15
+        paragraph.paragraph_format.space_before = Pt(2)
+        paragraph.paragraph_format.space_after = Pt(4 if level == 0 else 2)
+        paragraph.paragraph_format.line_spacing = 1.12
 
         for child in item.children:
             if isinstance(child, NavigableString):
@@ -1185,6 +1524,21 @@ def _add_list(doc: Document, list_tag: Tag, ordered: bool, content_width_inches:
             child_name = (child.name or '').lower()
             if child_name in {'ul', 'ol'}:
                 _add_list(doc, child, ordered=(child_name == 'ol'), content_width_inches=content_width_inches, level=level + 1)
+            elif child_name == 'p':
+                if any(_is_multiline_code_tag(grandchild) for grandchild in child.children):
+                    _add_list_paragraph_with_code_blocks(
+                        doc,
+                        paragraph,
+                        child,
+                        content_width_inches,
+                        level,
+                        base_indent,
+                        indent_step,
+                    )
+                else:
+                    if paragraph.runs and paragraph.text.strip():
+                        paragraph.add_run().add_break()
+                    _add_runs(doc, paragraph, child, content_width_inches)
             else:
                 _add_runs(doc, paragraph, child, content_width_inches)
 
@@ -1194,7 +1548,9 @@ def _add_list(doc: Document, list_tag: Tag, ordered: bool, content_width_inches:
                 parent.remove(paragraph._element)
 
     if level == 0:
-        doc.add_paragraph()
+        spacer = doc.add_paragraph()
+        spacer.paragraph_format.space_before = Pt(0)
+        spacer.paragraph_format.space_after = Pt(2)
 
 
 def _add_figure(doc: Document, figure_tag: Tag, content_width_inches: float) -> None:
@@ -1329,18 +1685,39 @@ def _add_table_from_tag(doc: Document, table_tag: Tag, content_width_inches: flo
         parsed_rows.append(cells)
         max_cols = max(max_cols, len(cells))
 
+    if max_cols == 0:
+        return
+
+    header_rows = {
+        idx
+        for idx, cells in enumerate(parsed_rows)
+        if any((cell.name or '').lower() == 'th' for cell in cells)
+    }
+
     docx_table = doc.add_table(rows=len(parsed_rows), cols=max_cols)
     docx_table.style = 'Table Grid'
     docx_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    docx_table.autofit = True
+
+    column_width = Inches(max((content_width_inches - 0.2) / max_cols, 1.0))
+    for col in docx_table.columns:
+        for cell in col.cells:
+            cell.width = column_width
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.TOP
 
     for r_idx, cells in enumerate(parsed_rows):
         for c_idx in range(max_cols):
             cell = docx_table.cell(r_idx, c_idx)
             paragraph = cell.paragraphs[0]
             paragraph.text = ''
+            paragraph.paragraph_format.space_before = Pt(1)
+            paragraph.paragraph_format.space_after = Pt(1)
+            paragraph.paragraph_format.line_spacing = 1.08
             if c_idx < len(cells):
                 content = cells[c_idx]
-                is_header = (content.name or '').lower() == 'th'
+                is_header = (content.name or '').lower() == 'th' or r_idx in header_rows
+                if is_header:
+                    _set_cell_background(cell, 'EAF2FB')
                 _add_runs(doc, paragraph, content, content_width_inches, bold=is_header)
 
     doc.add_paragraph()
@@ -1349,7 +1726,7 @@ def _add_table_from_tag(doc: Document, table_tag: Tag, content_width_inches: flo
 def _add_html_content(doc: Document, nodes, content_width_inches: float) -> None:
     for child in nodes:
         if isinstance(child, NavigableString):
-            text = str(child).strip()
+            text = _normalize_inline_whitespace(str(child)).strip()
             if text:
                 paragraph = doc.add_paragraph(text)
                 paragraph.paragraph_format.space_after = Pt(6)
@@ -1360,31 +1737,47 @@ def _add_html_content(doc: Document, nodes, content_width_inches: float) -> None
 
         name = (child.name or '').lower()
 
-        if name == 'p':
-            paragraph = doc.add_paragraph()
-            _add_runs(doc, paragraph, child, content_width_inches)
-            paragraph.paragraph_format.space_after = Pt(6)
+        if name == 'pre':
+            code_tag = child.find('code')
+            code_text = code_tag.get_text() if code_tag else child.get_text()
+            _add_code_block(doc, code_text)
             continue
 
-        if name == 'h2':
+        if name == 'p':
+            if _is_code_only_paragraph(child):
+                code_tag = child.find('code')
+                if code_tag:
+                    _add_code_block(doc, code_tag.get_text())
+                    continue
+
+            if any(_is_multiline_code_tag(grandchild) for grandchild in child.children):
+                _add_mixed_paragraph_with_code_blocks(doc, child, content_width_inches)
+                continue
+
+            paragraph = _new_body_paragraph(doc)
+            _add_runs(doc, paragraph, child, content_width_inches)
+            if not paragraph.text.strip():
+                _remove_paragraph(paragraph)
+            continue
+
+        if name in {'h2', 'h3', 'h4', 'h5', 'h6'}:
+            heading_text = child.get_text(' ', strip=True)
+            if not heading_text:
+                continue
+            level = int(name[1])
             paragraph = doc.add_paragraph()
-            paragraph.paragraph_format.space_before = Pt(6)
+            heading_style_name = f'Heading {min(level, 4)}'
+            try:
+                paragraph.style = doc.styles[heading_style_name]
+            except KeyError:
+                paragraph.style = doc.styles['Normal']
+            paragraph.paragraph_format.space_before = Pt(10 if level == 2 else 7)
             paragraph.paragraph_format.space_after = Pt(4)
             paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            run = paragraph.add_run(child.get_text(strip=True).upper())
+            run = paragraph.add_run(heading_text)
             run.bold = True
             run.font.name = 'Calibri'
-            run.font.size = Pt(12)
-            continue
-
-        if name == 'h3':
-            paragraph = doc.add_paragraph()
-            paragraph.paragraph_format.space_before = Pt(4)
-            paragraph.paragraph_format.space_after = Pt(4)
-            run = paragraph.add_run(child.get_text(strip=True))
-            run.bold = True
-            run.font.name = 'Calibri'
-            run.font.size = Pt(11)
+            run.font.size = Pt({2: 13, 3: 12, 4: 11, 5: 11, 6: 11}.get(level, 11))
             continue
 
         if name == 'ul':
@@ -1406,12 +1799,13 @@ def _add_html_content(doc: Document, nodes, content_width_inches: float) -> None
         if name == 'blockquote':
             paragraph = doc.add_paragraph()
             paragraph.paragraph_format.left_indent = Pt(18)
+            paragraph.paragraph_format.line_spacing = 1.12
             paragraph.paragraph_format.space_after = Pt(6)
             _add_runs(doc, paragraph, child, content_width_inches)
             continue
 
         if name == 'hr':
-            doc.add_page_break()
+            _add_horizontal_rule(doc)
             continue
 
         _add_html_content(doc, child.children, content_width_inches)
@@ -1640,7 +2034,7 @@ def main(layout_assets_dir: Optional[Path] = None) -> int:
         print(f"[OK] {len(mermaid_paths)} diagrama(s) Mermaid disponível(is) em: {DIAGRAMS_DIR}")
 
     # Converte markdown para HTML intermediário e monta BeautifulSoup para processar no DOCX
-    html_body_raw = markdown(md_processed, extensions=['extra', 'tables', 'sane_lists', 'toc'])
+    html_body_raw = markdown(md_processed, extensions=['extra', 'fenced_code', 'tables', 'sane_lists', 'toc'])
     soup = BeautifulSoup(html_body_raw, 'html.parser')
     inject_print_figures(soup, occurrences)
 
