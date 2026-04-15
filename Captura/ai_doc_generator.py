@@ -31,9 +31,47 @@ DEFAULT_MODEL_CHAIN = [
     "gemini-3-flash-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    # Modelo TTS não é ideal para geração de documentação, mas está na lista do print.
-    "gemini-2.5-flash-tts",
 ]
+
+# Prefixos de modelos relevantes para geração de texto/documentação
+_RELEVANT_MODEL_PREFIXES = ("gemini-",)
+# Sufixos a excluir (modelos não adequados para geração de docs)
+_EXCLUDED_MODEL_SUFFIXES = ("-tts",)
+_EXCLUDED_MODEL_SUBSTRINGS = ("tts", "imagen", "embedding", "aqa", "retrieval", "veo")
+
+
+def _fetch_available_models(api_key: str) -> list[str]:
+    """Consulta a API do Gemini e retorna nomes de modelos disponíveis para geração de texto.
+    Resultados são cacheados no session_state para evitar chamadas repetidas."""
+    cache_key = "_cached_gemini_models"
+    cache_key_api = "_cached_gemini_models_api_key"
+    # Retornar cache se a mesma API key
+    if (cache_key in st.session_state
+            and st.session_state.get(cache_key_api) == api_key
+            and st.session_state[cache_key]):
+        return st.session_state[cache_key]
+    try:
+        client = genai.Client(api_key=api_key)
+        all_models: list[str] = []
+        for m in client.models.list():
+            name = getattr(m, "name", "") or ""
+            # A API retorna "models/gemini-..."; normalizar para só o id
+            if name.startswith("models/"):
+                name = name[len("models/"):]
+            if not name:
+                continue
+            # Filtrar apenas modelos relevantes
+            if not any(name.startswith(p) for p in _RELEVANT_MODEL_PREFIXES):
+                continue
+            if any(sub in name.lower() for sub in _EXCLUDED_MODEL_SUBSTRINGS):
+                continue
+            all_models.append(name)
+        all_models.sort()
+        st.session_state[cache_key] = all_models
+        st.session_state[cache_key_api] = api_key
+        return all_models
+    except Exception:
+        return []
 
 
 # ===============================
@@ -85,6 +123,8 @@ def _init_session_state():
         st.session_state.layout_load_attempts = 0
     if "last_video_path" not in st.session_state:
         st.session_state.last_video_path = ""
+    if "selected_gemini_model" not in st.session_state:
+        st.session_state.selected_gemini_model = ""
 
 
 def _trigger_rerun() -> None:
@@ -273,6 +313,11 @@ Para gerar a documentação com IA, você precisa de uma API Key do Google AI St
 
 def _get_model_chain() -> list[str]:
     """Retorna a cadeia de fallback (mais forte -> mais leve)."""
+    # 0) Modelo escolhido pelo usuário na UI tem precedência
+    ui_model = (st.session_state.get("selected_gemini_model") or "").strip()
+    if ui_model:
+        return [ui_model]
+
     # 1) env tem precedência
     env_models = (os.environ.get("GEMINI_MODELS") or "").strip()
     env_model = (os.environ.get("GEMINI_MODEL") or "").strip()
@@ -804,6 +849,27 @@ def main():
         if api_key:
             os.environ["GEMINI_API_KEY"] = api_key
 
+        # Seletor de modelo Gemini (lista dinâmica da API)
+        if api_key:
+            available_models = _fetch_available_models(api_key)
+            if available_models:
+                # Opção padrão: automático (usa cadeia de fallback)
+                model_options = ["Automático (fallback)"] + available_models
+                current_sel = st.session_state.selected_gemini_model
+                default_idx = model_options.index(current_sel) if current_sel in model_options else 0
+                chosen = st.selectbox(
+                    "Modelo Gemini",
+                    model_options,
+                    index=default_idx,
+                    help="Escolha um modelo específico ou 'Automático' para tentar vários em sequência.",
+                )
+                st.session_state.selected_gemini_model = chosen if chosen != "Automático (fallback)" else ""
+            else:
+                st.caption("Não foi possível listar modelos. Usando cadeia padrão.")
+                st.session_state.selected_gemini_model = ""
+        else:
+            st.session_state.selected_gemini_model = ""
+
         st.markdown("---")
         st.subheader("Rodapé do documento")
         st.text_input(
@@ -1265,6 +1331,27 @@ def main():
                 </div>
                 """,
                 unsafe_allow_html=True,
+            )
+        # Botões de download lado a lado: DOCX + MD
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            st.download_button(
+                label="Baixar DOCX",
+                data=st.session_state.last_docx_bytes,
+                file_name=st.session_state.last_docx_name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="download_docx_btn",
+                use_container_width=True,
+            )
+        with dl_col2:
+            md_filename = st.session_state.last_docx_name.replace(".docx", ".md")
+            st.download_button(
+                label="Baixar MD",
+                data=st.session_state.generated_md.encode("utf-8"),
+                file_name=md_filename,
+                mime="text/markdown",
+                key="download_md_btn",
+                use_container_width=True,
             )
 
     # Campo de alterações pós-geração
