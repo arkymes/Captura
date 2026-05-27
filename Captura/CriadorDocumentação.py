@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
@@ -77,12 +78,94 @@ MERMAID_BLOCK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 PRINT_TOKEN_PATTERN = re.compile(r"PRINT_SLOT_(\d+)_TOKEN")
+INLINE_ARTIFACT_WITH_TITLE_PATTERN = re.compile(
+    r"!\[(?P<title>[^\]\r\n]+)\]\s*<<\s*(?P<src>[^<>\r\n]+?)\s*>>"
+)
+INLINE_ARTIFACT_PATTERN = re.compile(r"<<\s*(?P<src>[^<>\r\n]+?)\s*>>")
+LIST_ITEM_LINE_PATTERN = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>(?:\d+[.)]|[-*+]))[ \t]+(?P<content>.*)$")
+
+ASSET_SEARCH_ROOTS: List[Path] = [OUT_DIR, WORKDIR]
+ASSET_RESOLVE_CACHE: Dict[str, Optional[Path]] = {}
 
 _CODE_LANG_HINTS = {
     "python", "py", "bash", "sh", "shell", "powershell", "ps1", "sql", "json",
     "yaml", "yml", "xml", "html", "css", "javascript", "js", "typescript", "ts",
     "mermaid", "kql", "text", "plaintext", "cmd", "bat", "toml", "ini",
 }
+
+
+def _indent_width(indent_text: str) -> int:
+    return len(indent_text.expandtabs(4))
+
+
+def _normalize_nested_list_markdown(md_text: str) -> str:
+    lines = md_text.splitlines()
+    if not lines:
+        return md_text
+
+    normalized: List[str] = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        normalized.append(line)
+        parent_match = LIST_ITEM_LINE_PATTERN.match(line)
+        if parent_match is None:
+            i += 1
+            continue
+
+        parent_indent_width = _indent_width(parent_match.group('indent'))
+        child_index = i + 1
+        if child_index >= len(lines) or not lines[child_index].strip():
+            i += 1
+            continue
+
+        first_child_match = LIST_ITEM_LINE_PATTERN.match(lines[child_index])
+        if first_child_match is None:
+            i += 1
+            continue
+
+        first_child_indent_width = _indent_width(first_child_match.group('indent'))
+        if first_child_indent_width <= parent_indent_width or first_child_indent_width >= (parent_indent_width + 4):
+            i += 1
+            continue
+
+        target_indent = ' ' * (parent_indent_width + 4)
+        normalized.append('')
+
+        j = child_index
+        while j < len(lines):
+            candidate = lines[j]
+            if not candidate.strip():
+                normalized.append(candidate)
+                j += 1
+                break
+
+            candidate_match = LIST_ITEM_LINE_PATTERN.match(candidate)
+            if candidate_match:
+                candidate_indent_width = _indent_width(candidate_match.group('indent'))
+                if candidate_indent_width <= parent_indent_width:
+                    break
+                normalized.append(f"{target_indent}{candidate.lstrip(' \t')}")
+                j += 1
+                continue
+
+            continuation_indent_width = len(re.match(r"^[ \t]*", candidate).group(0).expandtabs(4))
+            if continuation_indent_width > parent_indent_width:
+                if continuation_indent_width < (parent_indent_width + 4):
+                    normalized.append(f"{target_indent}{candidate.lstrip(' \t')}")
+                else:
+                    normalized.append(candidate)
+                j += 1
+                continue
+            break
+
+        i = j
+
+    normalized_text = '\n'.join(normalized)
+    if md_text.endswith('\n'):
+        normalized_text += '\n'
+    return normalized_text
 
 
 @dataclass
@@ -92,6 +175,128 @@ class PrintOccurrence:
     description: str
     image_path: Path
     coords: Optional[Tuple[int, int]]
+
+
+def _dedupe_paths(paths: List[Path]) -> List[Path]:
+    unique: List[Path] = []
+    seen: set = set()
+    for path in paths:
+        try:
+            normalized = path.resolve()
+        except Exception:
+            normalized = path
+        key = str(normalized).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(normalized)
+    return unique
+
+
+def _configure_asset_search_roots(
+    md_source_path: Optional[Path],
+    asset_paths_from_md: bool,
+    asset_base_dir: Optional[Path] = None,
+) -> None:
+    global ASSET_SEARCH_ROOTS
+    roots: List[Path] = []
+    if asset_base_dir is not None:
+        roots.append(asset_base_dir)
+    if asset_paths_from_md and md_source_path is not None:
+        roots.append(md_source_path.parent)
+    roots.extend([OUT_DIR, WORKDIR, Path.cwd()])
+    ASSET_SEARCH_ROOTS = _dedupe_paths(roots)
+    ASSET_RESOLVE_CACHE.clear()
+
+
+def _path_suffix_matches(path: Path, suffix_parts: Tuple[str, ...]) -> bool:
+    if not suffix_parts:
+        return False
+    path_parts = [part.lower() for part in path.parts]
+    expected = [part.lower() for part in suffix_parts]
+    if len(path_parts) < len(expected):
+        return False
+    return path_parts[-len(expected):] == expected
+
+
+def _iter_asset_discovery_roots() -> List[Path]:
+    roots: List[Path] = []
+    for root in ASSET_SEARCH_ROOTS:
+        current = root
+        for _ in range(3):
+            roots.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+    return _dedupe_paths(roots)
+
+
+def _discover_asset_path(src: str) -> Optional[Path]:
+    src_path = Path(src)
+    src_parts = tuple(part for part in src_path.parts if part not in ('', '.'))
+    if not src_parts:
+        return None
+
+    filename = src_parts[-1]
+    for root in _iter_asset_discovery_roots():
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            for candidate in root.rglob(filename):
+                if not candidate.is_file():
+                    continue
+                if not _path_suffix_matches(candidate, src_parts):
+                    continue
+                try:
+                    return candidate.resolve()
+                except Exception:
+                    return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _build_inline_artifact_figure_html(src: str, title: Optional[str] = None) -> str:
+    clean_title = (title or '').strip()
+    if clean_title:
+        alt_text = clean_title
+    else:
+        alt_text = re.sub(r"[_-]+", " ", Path(src).stem).strip() or "Print"
+
+    escaped_src = escape(src, quote=True)
+    escaped_alt = escape(alt_text, quote=True)
+    if clean_title:
+        escaped_caption = escape(clean_title)
+        return (
+            f'<figure class="video-print">'
+            f'<img src="{escaped_src}" alt="{escaped_alt}" loading="lazy"/>'
+            f'<figcaption>{escaped_caption}</figcaption>'
+            '</figure>'
+        )
+    return (
+        f'<figure class="video-print">'
+        f'<img src="{escaped_src}" alt="{escaped_alt}" loading="lazy"/>'
+        '</figure>'
+    )
+
+
+def _replace_inline_artifact_markers(md_text: str) -> str:
+    def repl_with_title(match: re.Match) -> str:
+        src = (match.group('src') or '').strip()
+        title = (match.group('title') or '').strip()
+        if not src:
+            return match.group(0)
+        return _build_inline_artifact_figure_html(src, title=title)
+
+    def repl(match: re.Match) -> str:
+        src = (match.group('src') or '').strip()
+        if not src:
+            return match.group(0)
+        return _build_inline_artifact_figure_html(src)
+
+    text_with_titles = INLINE_ARTIFACT_WITH_TITLE_PATTERN.sub(repl_with_title, md_text)
+    return INLINE_ARTIFACT_PATTERN.sub(repl, text_with_titles)
 
 
 def ensure_dirs() -> None:
@@ -974,6 +1179,36 @@ def _add_page_counter(paragraph) -> None:
     _add_field(paragraph, 'NUMPAGES')
 
 
+def _parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Converte Markdown em DOCX com suporte a prints, Mermaid e layout corporativo.",
+    )
+    parser.add_argument(
+        "--md-file",
+        type=str,
+        help="Caminho do arquivo .md de origem. Quando omitido, lê o Markdown via stdin.",
+    )
+    parser.add_argument(
+        "--inline-artifact-markers",
+        action="store_true",
+        help=(
+            "Converte marcadores no formato <<caminho/arquivo.png>> em figuras no DOCX "
+            "e, quando usado com --md-file, resolve caminhos relativos a partir do diretório do MD."
+        ),
+    )
+    parser.add_argument(
+        "--asset-paths-from-md",
+        action="store_true",
+        help="Resolve caminhos relativos de imagem com base no diretório do --md-file.",
+    )
+    parser.add_argument(
+        "--asset-base-dir",
+        type=str,
+        help="Pasta base opcional para resolver caminhos relativos de imagem (incluindo <<...>>).",
+    )
+    return parser.parse_args(argv)
+
+
 def _normalize_inline_whitespace(text: str) -> str:
     if not text:
         return ''
@@ -1227,11 +1462,38 @@ def _add_horizontal_rule(doc: Document) -> None:
 def _resolve_asset_path(src: str) -> Optional[Path]:
     if not src:
         return None
-    candidate = Path(src)
-    if not candidate.is_absolute():
-        candidate = (OUT_DIR / src).resolve()
-    if candidate.exists():
-        return candidate
+
+    src_key = src.strip().lower()
+    if src_key in ASSET_RESOLVE_CACHE:
+        return ASSET_RESOLVE_CACHE[src_key]
+
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", src):
+        ASSET_RESOLVE_CACHE[src_key] = None
+        return None
+
+    candidate = Path(src).expanduser()
+    if candidate.is_absolute():
+        if candidate.exists():
+            ASSET_RESOLVE_CACHE[src_key] = candidate
+            return candidate
+        ASSET_RESOLVE_CACHE[src_key] = None
+        return None
+
+    for root in ASSET_SEARCH_ROOTS:
+        try:
+            resolved = (root / src).resolve()
+        except Exception:
+            resolved = root / src
+        if resolved.exists():
+            ASSET_RESOLVE_CACHE[src_key] = resolved
+            return resolved
+
+    discovered = _discover_asset_path(src)
+    if discovered is not None:
+        ASSET_RESOLVE_CACHE[src_key] = discovered
+        return discovered
+
+    ASSET_RESOLVE_CACHE[src_key] = None
     return None
 
 
@@ -1496,17 +1758,24 @@ def _add_runs(
 
 
 def _add_list(doc: Document, list_tag: Tag, ordered: bool, content_width_inches: float, level: int = 0) -> None:
-    style_name = 'List Number' if ordered else 'List Bullet'
+    style_name = 'Normal' if ordered else 'List Bullet'
     base_indent = 22
     indent_step = 16
 
-    for item in list_tag.find_all('li', recursive=False):
+    for item_index, item in enumerate(list_tag.find_all('li', recursive=False), start=1):
         meaningful_children = [child for child in item.children if not (isinstance(child, NavigableString) and not str(child).strip())]
         if len(meaningful_children) == 1 and isinstance(meaningful_children[0], Tag) and (meaningful_children[0].name or '').lower() == 'figure':
             _add_figure(doc, meaningful_children[0], content_width_inches)
             continue
 
         paragraph = doc.add_paragraph(style=style_name)
+        has_inline_content = False
+
+        if ordered:
+            marker_run = paragraph.add_run(f"{item_index}. ")
+            marker_run.font.name = 'Calibri'
+            marker_run.font.size = Pt(11)
+
         paragraph.paragraph_format.left_indent = Pt(base_indent + level * indent_step)
         paragraph.paragraph_format.first_line_indent = Pt(0)
         paragraph.paragraph_format.space_before = Pt(2)
@@ -1515,7 +1784,12 @@ def _add_list(doc: Document, list_tag: Tag, ordered: bool, content_width_inches:
 
         for child in item.children:
             if isinstance(child, NavigableString):
+                before_text = paragraph.text
                 _add_runs(doc, paragraph, child, content_width_inches)
+                if paragraph.text != before_text:
+                    text_delta = paragraph.text[len(before_text):]
+                    if _normalize_inline_whitespace(text_delta).strip():
+                        has_inline_content = True
                 continue
 
             if not isinstance(child, Tag):
@@ -1535,14 +1809,30 @@ def _add_list(doc: Document, list_tag: Tag, ordered: bool, content_width_inches:
                         base_indent,
                         indent_step,
                     )
+                    has_inline_content = has_inline_content or bool(paragraph.text.strip())
                 else:
-                    if paragraph.runs and paragraph.text.strip():
+                    if has_inline_content:
                         paragraph.add_run().add_break()
+                    before_text = paragraph.text
                     _add_runs(doc, paragraph, child, content_width_inches)
+                    if paragraph.text != before_text:
+                        text_delta = paragraph.text[len(before_text):]
+                        if _normalize_inline_whitespace(text_delta).strip():
+                            has_inline_content = True
             else:
+                before_text = paragraph.text
                 _add_runs(doc, paragraph, child, content_width_inches)
+                if paragraph.text != before_text:
+                    text_delta = paragraph.text[len(before_text):]
+                    if _normalize_inline_whitespace(text_delta).strip():
+                        has_inline_content = True
 
-        if not paragraph.text.strip():
+        if ordered:
+            if not has_inline_content:
+                parent = paragraph._element.getparent()
+                if parent is not None:
+                    parent.remove(paragraph._element)
+        elif not paragraph.text.strip():
             parent = paragraph._element.getparent()
             if parent is not None:
                 parent.remove(paragraph._element)
@@ -2000,19 +2290,68 @@ def _configure_footer(section, metadata: dict, footer_banner_path: Optional[Path
     _add_page_counter(pages_paragraph)
 
 
-def main(layout_assets_dir: Optional[Path] = None) -> int:
+def main(
+    layout_assets_dir: Optional[Path] = None,
+    md_file: Optional[Path] = None,
+    inline_artifact_markers: bool = False,
+    asset_paths_from_md: bool = False,
+    asset_base_dir: Optional[Path] = None,
+) -> int:
     ensure_dirs()
     # Redireciona stdout textual para stderr para evitar poluir o fluxo binário do DOCX
-    orig_stdout = sys.stdout
     orig_out_buffer = sys.stdout.buffer
     sys.stdout = sys.stderr
-    # Ler md de stdin como bytes e decodear
-    md_bytes = sys.stdin.buffer.read()
-    md_text = md_bytes.decode('utf-8', errors='replace')  # Substituir caracteres inválidos
+
+    md_source_path: Optional[Path] = None
+    if md_file is not None:
+        try:
+            md_source_path = md_file.expanduser().resolve()
+        except Exception:
+            md_source_path = md_file.expanduser()
+        if not md_source_path.exists() or not md_source_path.is_file():
+            print(f"[ERRO] Arquivo MD não encontrado: {md_source_path}")
+            return 1
+        try:
+            md_text = md_source_path.read_text(encoding='utf-8', errors='replace')
+        except Exception as exc:
+            print(f"[ERRO] Falha ao ler arquivo MD ({md_source_path}): {exc}")
+            return 1
+    else:
+        # Ler md de stdin como bytes e decodear
+        md_bytes = sys.stdin.buffer.read()
+        md_text = md_bytes.decode('utf-8', errors='replace')  # Substituir caracteres inválidos
+
     md_text = clean_text(md_text)
+    md_text = _normalize_nested_list_markdown(md_text)
     if not md_text.strip():
-        print("[ERRO] Nenhum conteúdo MD fornecido via stdin")
+        if md_source_path is not None:
+            print(f"[ERRO] Arquivo MD vazio: {md_source_path}")
+        else:
+            print("[ERRO] Nenhum conteúdo MD fornecido via stdin")
         return 1
+
+    if asset_paths_from_md and md_source_path is None:
+        print("[AVISO] --asset-paths-from-md foi informado sem --md-file; usando diretórios padrão.")
+
+    if asset_base_dir is None:
+        env_asset_base_dir = (os.environ.get("INLINE_ARTIFACTS_BASE_DIR") or "").strip()
+        if env_asset_base_dir:
+            asset_base_dir = Path(env_asset_base_dir).expanduser()
+
+    if asset_base_dir is not None:
+        try:
+            asset_base_dir = asset_base_dir.expanduser().resolve()
+        except Exception:
+            asset_base_dir = asset_base_dir.expanduser()
+        if not asset_base_dir.exists() or not asset_base_dir.is_dir():
+            print(f"[AVISO] Pasta base de assets não encontrada: {asset_base_dir}. Usando diretórios padrão.")
+            asset_base_dir = None
+
+    resolve_from_md = asset_paths_from_md or (inline_artifact_markers and md_source_path is not None)
+    _configure_asset_search_roots(md_source_path, resolve_from_md, asset_base_dir)
+
+    if inline_artifact_markers:
+        md_text = _replace_inline_artifact_markers(md_text)
     
     # Vídeo é opcional - se não existir, prints não serão extraídos
     video_available = VIDEO_FILE.exists() if _VIDEO_ENV else False
@@ -2034,7 +2373,7 @@ def main(layout_assets_dir: Optional[Path] = None) -> int:
         print(f"[OK] {len(mermaid_paths)} diagrama(s) Mermaid disponível(is) em: {DIAGRAMS_DIR}")
 
     # Converte markdown para HTML intermediário e monta BeautifulSoup para processar no DOCX
-    html_body_raw = markdown(md_processed, extensions=['extra', 'fenced_code', 'tables', 'sane_lists', 'toc'])
+    html_body_raw = markdown(md_processed, extensions=['extra', 'fenced_code', 'tables', 'sane_lists', 'toc', 'nl2br'])
     soup = BeautifulSoup(html_body_raw, 'html.parser')
     inject_print_figures(soup, occurrences)
 
@@ -2087,4 +2426,14 @@ def main(layout_assets_dir: Optional[Path] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    args = _parse_cli_args()
+    md_file_path = Path(args.md_file) if args.md_file else None
+    asset_base_dir_path = Path(args.asset_base_dir) if args.asset_base_dir else None
+    sys.exit(
+        main(
+            md_file=md_file_path,
+            inline_artifact_markers=args.inline_artifact_markers,
+            asset_paths_from_md=args.asset_paths_from_md,
+            asset_base_dir=asset_base_dir_path,
+        )
+    )

@@ -82,6 +82,29 @@ A aplicação abrirá automaticamente no seu navegador em `http://localhost:8501
 6. **Refinamento**: Use o chat para ajustar e melhorar a documentação
 7. **Download**: Baixe o arquivo Word gerado
 
+### Marcadores de imagem `<<...>>` no arquivo .md
+
+Quando você envia um `.md`, o Captura pode converter textos como:
+
+`<<artifacts/ui_audit_2026-05-26/01_split_pages_top.png>>`
+
+em imagem real no documento Word.
+
+Também é possível definir título/legenda da imagem no próprio markdown:
+
+`![Tela principal - estrutura]<<artifacts/ui_audit_2026-05-26/01_split_pages_top.png>>`
+
+Nesse formato, o texto entre `[]` vira o título/legenda da imagem no DOCX.
+
+Para isso:
+
+1. Envie o arquivo `.md` em **Entradas**
+2. Abra **Marcadores de imagem <<...>>**
+3. Ative **Ativar conversão de <<...>> em imagem no DOCX**
+4. Se necessário, preencha **Pasta base para resolver caminhos <<...>>**
+
+Observação: com upload de arquivo, o Captura tenta detectar automaticamente a pasta base dos `<<...>>`. Se não encontrar, informe a pasta manualmente no campo.
+
 ### Configuração de Layout Personalizado
 
 O Captura permite personalizar os elementos visuais dos documentos gerados:

@@ -3,7 +3,7 @@ import re
 import json
 import sys
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, List, Tuple
 import base64
 import tempfile
 import shutil
@@ -38,6 +38,7 @@ _RELEVANT_MODEL_PREFIXES = ("gemini-",)
 # Sufixos a excluir (modelos não adequados para geração de docs)
 _EXCLUDED_MODEL_SUFFIXES = ("-tts",)
 _EXCLUDED_MODEL_SUBSTRINGS = ("tts", "imagen", "embedding", "aqa", "retrieval", "veo")
+INLINE_ARTIFACT_SRC_PATTERN = re.compile(r"<<\s*(?P<src>[^<>\r\n]+?)\s*>>")
 
 
 def _fetch_available_models(api_key: str) -> list[str]:
@@ -125,6 +126,10 @@ def _init_session_state():
         st.session_state.last_video_path = ""
     if "selected_gemini_model" not in st.session_state:
         st.session_state.selected_gemini_model = ""
+    if "inline_artifact_markers_enabled" not in st.session_state:
+        st.session_state.inline_artifact_markers_enabled = True
+    if "inline_artifacts_base_dir" not in st.session_state:
+        st.session_state.inline_artifacts_base_dir = ""
 
 
 def _trigger_rerun() -> None:
@@ -776,6 +781,111 @@ def _sanitize_filename(name: str) -> str:
     return name or "documento.md"
 
 
+def _path_suffix_matches(path: Path, suffix_parts: Tuple[str, ...]) -> bool:
+    if not suffix_parts:
+        return False
+    path_parts = [part.lower() for part in path.parts]
+    expected = [part.lower() for part in suffix_parts]
+    if len(path_parts) < len(expected):
+        return False
+    return path_parts[-len(expected):] == expected
+
+
+def _extract_inline_artifact_sources(md_text: str) -> List[str]:
+    if not md_text:
+        return []
+    seen = set()
+    sources: List[str] = []
+    for match in INLINE_ARTIFACT_SRC_PATTERN.finditer(md_text):
+        src = (match.group("src") or "").strip()
+        if not src:
+            continue
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", src):
+            continue
+        key = src.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(src)
+    return sources
+
+
+def _infer_inline_artifacts_base_dir(md_text: str) -> Optional[Path]:
+    sources = _extract_inline_artifact_sources(md_text)
+    if not sources:
+        return None
+
+    search_roots: List[Path] = []
+    current = Path.cwd()
+    search_roots.append(current)
+    for _ in range(2):
+        parent = current.parent
+        if parent == current:
+            break
+        search_roots.append(parent)
+        current = parent
+
+    # Tentativa direta: uma raiz onde todos os caminhos relativos já existam
+    for root in search_roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        if all((root / Path(src)).exists() for src in sources if not Path(src).is_absolute()):
+            try:
+                return root.resolve()
+            except Exception:
+                return root
+
+    # Tentativa por descoberta: localizar o primeiro arquivo por sufixo do caminho
+    first_src = Path(sources[0])
+    suffix_parts = tuple(part for part in first_src.parts if part not in ("", "."))
+    if not suffix_parts:
+        return None
+
+    filename = suffix_parts[-1]
+    for root in search_roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            for candidate in root.rglob(filename):
+                if not candidate.is_file():
+                    continue
+                if not _path_suffix_matches(candidate, suffix_parts):
+                    continue
+
+                base_candidate = candidate
+                for _ in range(len(suffix_parts)):
+                    base_candidate = base_candidate.parent
+
+                if all((base_candidate / Path(src)).exists() for src in sources if not Path(src).is_absolute()):
+                    try:
+                        return base_candidate.resolve()
+                    except Exception:
+                        return base_candidate
+        except Exception:
+            continue
+
+    return None
+
+
+def _resolve_inline_artifacts_base_dir(md_text: str, manual_base_dir: str) -> Tuple[Optional[Path], Optional[str], bool]:
+    manual = (manual_base_dir or "").strip()
+    if manual:
+        manual_path = Path(manual).expanduser()
+        if not manual_path.exists() or not manual_path.is_dir():
+            return None, f"Pasta base dos marcadores não encontrada: {manual_path}", False
+        try:
+            manual_path = manual_path.resolve()
+        except Exception:
+            pass
+        return manual_path, None, False
+
+    inferred = _infer_inline_artifacts_base_dir(md_text)
+    if inferred is not None:
+        return inferred, None, True
+
+    return None, None, False
+
+
 # ===============================
 # App (Streamlit)
 # ===============================
@@ -1125,6 +1235,21 @@ def main():
     transcript_file = st.file_uploader("Transcrição (opcional: .vtt ou .txt)", type=["vtt", "txt"], accept_multiple_files=False)
     uploaded_md = st.file_uploader("Arquivo .md (opcional: usar este no lugar da IA)", type=["md"], accept_multiple_files=False)
 
+    with st.expander("Marcadores de imagem <<...>>", expanded=uploaded_md is not None):
+        inline_markers_enabled = st.checkbox(
+            "Ativar conversão de <<...>> em imagem no DOCX",
+            key="inline_artifact_markers_enabled",
+            disabled=uploaded_md is None,
+            help="No modo Arquivo .md, converte textos como <<artifacts/pasta/imagem.png>> em imagens no Word.",
+        )
+        st.text_input(
+            "Pasta base para resolver caminhos <<...>> (opcional)",
+            key="inline_artifacts_base_dir",
+            placeholder="Ex.: C:/Projetos/Relatorio/artifacts",
+            disabled=(uploaded_md is None or not inline_markers_enabled),
+            help="Se ficar vazio, o Captura tenta detectar automaticamente; preencha manualmente se não localizar.",
+        )
+
     st.write("")
     generate_btn = st.button("Gerar documentação DOCX", type="primary", use_container_width=True)
 
@@ -1273,9 +1398,24 @@ def main():
             # Usar diretório temporário para outputs
             with tempfile.TemporaryDirectory() as temp_output_dir:
                 env["OUTPUT_DIR"] = temp_output_dir
+                generator_cmd = [sys.executable, str(generator_script)]
+                use_inline_markers = bool(st.session_state.get("used_uploaded_md")) and bool(st.session_state.get("inline_artifact_markers_enabled"))
+                if use_inline_markers:
+                    generator_cmd.append("--inline-artifact-markers")
+                    inline_base_path, inline_base_error, auto_detected_base = _resolve_inline_artifacts_base_dir(
+                        st.session_state.generated_md,
+                        st.session_state.get("inline_artifacts_base_dir") or "",
+                    )
+                    if inline_base_error:
+                        status.update(label=inline_base_error, state="error")
+                        return
+                    if inline_base_path is not None:
+                        env["INLINE_ARTIFACTS_BASE_DIR"] = str(inline_base_path)
+                        if auto_detected_base:
+                            status.write(f"Pasta base de imagens detectada automaticamente: {inline_base_path}")
                 try:
                     proc = subprocess.run(
-                        [sys.executable, str(generator_script)],
+                        generator_cmd,
                         cwd=str(out_dir),
                         env=env,
                         input=st.session_state.generated_md.encode('utf-8'),  # Passar md como bytes via stdin
@@ -1487,9 +1627,24 @@ def main():
                 # Usar diretório temporário para outputs
                 with tempfile.TemporaryDirectory() as temp_output_dir:
                     env["OUTPUT_DIR"] = temp_output_dir
+                    generator_cmd = [sys.executable, str(generator_script)]
+                    use_inline_markers = bool(st.session_state.get("used_uploaded_md")) and bool(st.session_state.get("inline_artifact_markers_enabled"))
+                    if use_inline_markers:
+                        generator_cmd.append("--inline-artifact-markers")
+                        inline_base_path, inline_base_error, auto_detected_base = _resolve_inline_artifacts_base_dir(
+                            st.session_state.generated_md,
+                            st.session_state.get("inline_artifacts_base_dir") or "",
+                        )
+                        if inline_base_error:
+                            status.update(label=inline_base_error, state="error")
+                            return
+                        if inline_base_path is not None:
+                            env["INLINE_ARTIFACTS_BASE_DIR"] = str(inline_base_path)
+                            if auto_detected_base:
+                                status.write(f"Pasta base de imagens detectada automaticamente: {inline_base_path}")
                     try:
                         proc = subprocess.run(
-                            [sys.executable, str(generator_script)],
+                            generator_cmd,
                             cwd=str(out_dir),
                             env=env,
                             input=st.session_state.generated_md.encode('utf-8'),  # Passar md como bytes via stdin
